@@ -1,11 +1,5 @@
 import './style.css';
-import type {
-  InputState,
-  ObstacleType,
-  TrackPieceType,
-  RoomState,
-  BuildItemType,
-} from '../../shared/types';
+import type { InputState, ObstacleType, TrackPieceType, RoomState } from '../../shared/types';
 import {
   OBSTACLE_TYPES,
   OBSTACLE_LABELS,
@@ -56,10 +50,11 @@ let state: RoomState | null = null;
 let selectedObstacle: ObstacleType = 'barrier';
 let selectedTrackPiece: TrackPieceType = 'straight';
 let buildMode: 'trap' | 'track' = 'trap';
+let itemPicked = false; // must click an item button first
 let myReady = false;
-let inputTimer: number | null = null;
-let lastPredict = performance.now();
-let iAlreadyPlaced = false;
+let loopTimer: number | null = null;
+let lastTick = performance.now();
+let poseAccum = 0;
 
 const keys: InputState = {
   forward: false,
@@ -69,21 +64,13 @@ const keys: InputState = {
   boost: false,
 };
 
-function savedName(): string {
-  return localStorage.getItem('laptrap-name') || '';
-}
-function saveName(n: string): void {
-  localStorage.setItem('laptrap-name', n);
-}
-
-nameInput.value = savedName();
+nameInput.value = localStorage.getItem('laptrap-name') || '';
 
 function roomUrl(code: string): string {
   const u = new URL(location.href);
   u.searchParams.set('room', code);
   return u.toString();
 }
-
 function show(el: HTMLElement): void {
   el.classList.remove('hidden');
 }
@@ -97,32 +84,72 @@ function ensureScene(): GameScene {
     scene = new GameScene(canvas);
     scene.start();
     canvas.addEventListener('click', (e) => {
-      if (!scene?.placing) return;
-      const hit = scene.screenToTrack(e.clientX, e.clientY);
-      if (hit) scene.setGhostFromClick(hit.x, hit.z);
+      void onMapClick(e);
     });
   }
   scene.setLocalId(net.myId());
   return scene;
 }
 
+async function onMapClick(e: MouseEvent): Promise<void> {
+  if (!scene?.placing || !state) return;
+  const me = state.players.find((p) => p.id === net.myId());
+  if (me?.hasPlaced) return;
+
+  const hit = scene.screenToTrack(e.clientX, e.clientY);
+  if (!hit) return;
+  const pick = scene.setGhostFromClick(hit.x, hit.z);
+
+  if (!itemPicked) {
+    hudBanner.textContent = 'Select a trap or track piece first';
+    show(hudBanner);
+    setTimeout(() => hide(hudBanner), 1200);
+    return;
+  }
+
+  // Click-to-place immediately
+  if (buildMode === 'track') {
+    if (!pick.socketId) {
+      hudBanner.textContent = 'Click a green socket to place track';
+      show(hudBanner);
+      setTimeout(() => hide(hudBanner), 1200);
+      return;
+    }
+    const res = await net.placeTrackPiece(selectedTrackPiece, pick.socketId);
+    if (!res.ok) {
+      hudBanner.textContent = res.error || 'Place failed';
+      show(hudBanner);
+      setTimeout(() => hide(hudBanner), 1500);
+    }
+    return;
+  }
+
+  const res = await net.placeObstacle(selectedObstacle, scene.ghostPos.x, scene.ghostPos.z, scene.ghostPos.yaw);
+  if (!res.ok) {
+    hudBanner.textContent = res.error || 'Place failed';
+    show(hudBanner);
+    setTimeout(() => hide(hudBanner), 1500);
+  }
+}
+
 async function doCreate(): Promise<void> {
   menuError.textContent = '';
   const name = nameInput.value.trim() || 'Host';
-  saveName(name);
+  localStorage.setItem('laptrap-name', name);
   const res = await net.createRoom(name);
   if (!res.ok || !res.code) {
     menuError.textContent = res.error || 'Could not create room';
     return;
   }
   history.replaceState(null, '', `/?room=${res.code}`);
-  enterLobby();
+  hide(menu);
+  show(lobby);
 }
 
 async function doJoin(code?: string): Promise<void> {
   menuError.textContent = '';
   const name = nameInput.value.trim() || 'Racer';
-  saveName(name);
+  localStorage.setItem('laptrap-name', name);
   const c = (code || joinCodeInput.value).toUpperCase().trim();
   if (!c) {
     menuError.textContent = 'Enter a room code';
@@ -134,24 +161,8 @@ async function doJoin(code?: string): Promise<void> {
     return;
   }
   history.replaceState(null, '', `/?room=${c}`);
-  enterLobby();
-}
-
-function enterLobby(): void {
   hide(menu);
   show(lobby);
-  hide(gameRoot);
-}
-
-function enterGame(): void {
-  hide(menu);
-  hide(lobby);
-  show(gameRoot);
-  ensureScene();
-  startInputLoop();
-  if ('ontouchstart' in window || navigator.maxTouchPoints > 0) {
-    show(mobileControls);
-  }
 }
 
 $('#btn-create').addEventListener('click', () => void doCreate());
@@ -159,30 +170,24 @@ $('#btn-join').addEventListener('click', () => void doJoin());
 joinCodeInput.addEventListener('keydown', (e) => {
   if (e.key === 'Enter') void doJoin();
 });
-
 btnReady.addEventListener('click', () => {
   myReady = !myReady;
   net.setReady(myReady);
   btnReady.textContent = myReady ? 'Unready' : 'Ready';
 });
-
 btnStart.addEventListener('click', () => net.startGame());
-
 $('#btn-leave').addEventListener('click', () => {
   net.leaveRoom();
   location.href = '/';
 });
-
 $('#btn-copy').addEventListener('click', async () => {
   try {
     await navigator.clipboard.writeText(lobbyLink.href);
     lobbyMsg.textContent = 'Link copied!';
   } catch {
-    lobbyMsg.textContent = 'Copy failed — select the link manually.';
+    lobbyMsg.textContent = 'Copy failed';
   }
 });
-
-$('#btn-confirm-place').addEventListener('click', () => void confirmPlace());
 $('#btn-skip-place').addEventListener('click', () => net.skipPlace());
 btnRematch.addEventListener('click', () => net.rematch());
 $('#btn-home').addEventListener('click', () => {
@@ -197,14 +202,13 @@ function setBuildMode(mode: 'trap' | 'track'): void {
   if (mode === 'trap') {
     show(obstaclePicks);
     hide(trackPicks);
-    placeHint.textContent = 'Click asphalt for a trap · Enter place · Esc skip';
+    placeHint.textContent = 'Select a trap, then click asphalt to place (one per round)';
   } else {
     hide(obstaclePicks);
     trackPicks.classList.remove('hidden');
-    placeHint.textContent = 'Click a green socket, pick a piece, Place · Esc skip';
+    placeHint.textContent = 'Select a piece, then click a green socket (one per round)';
   }
 }
-
 tabTrap.addEventListener('click', () => setBuildMode('trap'));
 tabTrack.addEventListener('click', () => setBuildMode('track'));
 
@@ -212,8 +216,12 @@ for (const t of OBSTACLE_TYPES) {
   const b = document.createElement('button');
   b.className = 'btn';
   b.textContent = OBSTACLE_LABELS[t];
-  b.addEventListener('click', () => {
+  b.addEventListener('click', (ev) => {
+    ev.stopPropagation();
     selectedObstacle = t;
+    itemPicked = true;
+    buildMode = 'trap';
+    setBuildMode('trap');
     obstaclePicks.querySelectorAll('button').forEach((x) => x.classList.remove('selected'));
     b.classList.add('selected');
   });
@@ -225,8 +233,12 @@ for (const t of TRACK_PIECE_TYPES) {
   const b = document.createElement('button');
   b.className = 'btn';
   b.textContent = TRACK_PIECE_LABELS[t];
-  b.addEventListener('click', () => {
+  b.addEventListener('click', (ev) => {
+    ev.stopPropagation();
     selectedTrackPiece = t;
+    itemPicked = true;
+    buildMode = 'track';
+    setBuildMode('track');
     trackPicks.querySelectorAll('button').forEach((x) => x.classList.remove('selected'));
     b.classList.add('selected');
   });
@@ -234,34 +246,13 @@ for (const t of TRACK_PIECE_TYPES) {
 }
 (trackPicks.querySelector('button') as HTMLButtonElement)?.classList.add('selected');
 
-async function confirmPlace(): Promise<void> {
-  if (!scene || !state) return;
-  const me = state.players.find((p) => p.id === net.myId());
-  if (me?.hasPlaced) return;
-
-  if (buildMode === 'track') {
-    if (!scene.selectedSocketId) {
-      hudBanner.textContent = 'Select a green build socket first';
-      show(hudBanner);
-      setTimeout(() => hide(hudBanner), 1500);
-      return;
-    }
-    const res = await net.placeTrackPiece(selectedTrackPiece, scene.selectedSocketId);
-    if (!res.ok) {
-      hudBanner.textContent = res.error || 'Track place failed';
-      show(hudBanner);
-      setTimeout(() => hide(hudBanner), 1500);
-    }
-    return;
-  }
-
-  const { x, z, yaw } = scene.ghostPos;
-  const res = await net.placeObstacle(selectedObstacle, x, z, yaw);
-  if (!res.ok) {
-    hudBanner.textContent = res.error || 'Place failed';
-    show(hudBanner);
-    setTimeout(() => hide(hudBanner), 1500);
-  }
+function enterGame(): void {
+  hide(menu);
+  hide(lobby);
+  show(gameRoot);
+  ensureScene();
+  startLoop();
+  if ('ontouchstart' in window || navigator.maxTouchPoints > 0) show(mobileControls);
 }
 
 function renderLobby(s: RoomState): void {
@@ -270,14 +261,12 @@ function renderLobby(s: RoomState): void {
   const url = roomUrl(s.code);
   lobbyLink.href = url;
   lobbyLink.textContent = url;
-
   playerList.innerHTML = '';
   for (const p of s.players) {
     const li = document.createElement('li');
     const sw = document.createElement('span');
     sw.className = 'swatch';
     sw.style.background = p.color;
-    sw.style.color = p.color;
     const name = document.createElement('span');
     name.textContent = p.name + (p.id === net.myId() ? ' (you)' : '') + (p.isHost ? ' 👑' : '');
     const badge = document.createElement('span');
@@ -286,11 +275,9 @@ function renderLobby(s: RoomState): void {
     li.append(sw, name, badge);
     playerList.appendChild(li);
   }
-
   const me = s.players.find((p) => p.id === net.myId());
   if (me?.isHost) show(btnStart);
   else hide(btnStart);
-
   lobbyMsg.textContent =
     s.players.filter((p) => p.connected).length < 2
       ? 'Waiting for at least 2 players… (max 10)'
@@ -307,7 +294,6 @@ function renderHud(s: RoomState): void {
   else if (myCar && s.phase === 'racing') {
     const sorted = [...s.cars].sort((a, b) => {
       if (a.finished !== b.finished) return a.finished ? -1 : 1;
-      if (a.laps !== b.laps) return b.laps - a.laps;
       return b.lapProgress - a.lapProgress;
     });
     const place = sorted.findIndex((c) => c.id === net.myId()) + 1;
@@ -323,9 +309,7 @@ function renderHud(s: RoomState): void {
   if (s.phase === 'countdown' && s.countdown > 0) {
     hudCountdown.textContent = String(s.countdown);
     show(hudCountdown);
-  } else {
-    hide(hudCountdown);
-  }
+  } else hide(hudCountdown);
 
   if (s.phase === 'results') {
     const lines = s.finishOrder.map((id, i) => {
@@ -333,13 +317,10 @@ function renderHud(s: RoomState): void {
       const pts = [5, 4, 3, 2, 1, 1, 0, 0, 0, 0][i] ?? 0;
       return `<div>${i + 1}. ${p?.name ?? '?'} <strong>+${pts}</strong></div>`;
     });
-    resultsOverlay.innerHTML = `<h2>Race Results</h2>${lines.join('')}<p class="hint">Everyone builds traps & track next…</p>`;
+    resultsOverlay.innerHTML = `<h2>Race Results</h2>${lines.join('')}<p class="hint">Everyone places one trap or track piece…</p>`;
     show(resultsOverlay);
-  } else {
-    hide(resultsOverlay);
-  }
+  } else hide(resultsOverlay);
 
-  // Simultaneous placing
   if (s.phase === 'placing') {
     show(placeUi);
     const meP = s.players.find((p) => p.id === net.myId());
@@ -347,23 +328,17 @@ function renderHud(s: RoomState): void {
     const total = s.players.filter((p) => p.connected).length;
     placeTimer.textContent = `${s.placeTimeLeft}s`;
     if (meP?.hasPlaced) {
-      placeTurn.textContent = `Placed! Waiting for others (${placedCount}/${total})…`;
-      placeUi.querySelectorAll('button').forEach((el) => {
-        if (el.id === 'btn-skip-place' || el.id === 'btn-confirm-place' || el.id.startsWith('tab')) {
-          (el as HTMLButtonElement).disabled = true;
-        }
-      });
+      placeTurn.textContent = `Done! Waiting (${placedCount}/${total})…`;
       scene?.setPlacing(false);
+      itemPicked = false;
     } else {
-      placeTurn.textContent = `Build phase — place ONE trap or track piece (${placedCount}/${total} done)`;
-      placeUi.querySelectorAll('button').forEach((el) => {
-        (el as HTMLButtonElement).disabled = false;
-      });
+      placeTurn.textContent = `Build — pick ONE item, click map (${placedCount}/${total})`;
       scene?.setPlacing(true);
     }
   } else {
     hide(placeUi);
     scene?.setPlacing(false);
+    itemPicked = false;
   }
 
   if (s.phase === 'gameover') {
@@ -372,16 +347,15 @@ function renderHud(s: RoomState): void {
     show(gameoverOverlay);
     if (me?.isHost) show(btnRematch);
     else hide(btnRematch);
-  } else {
-    hide(gameoverOverlay);
-  }
+  } else hide(gameoverOverlay);
 }
 
 function onState(s: RoomState): void {
   state = s;
-  iAlreadyPlaced = !!s.players.find((p) => p.id === net.myId())?.hasPlaced;
   if (s.phase === 'lobby') {
-    enterLobby();
+    hide(menu);
+    show(lobby);
+    hide(gameRoot);
     renderLobby(s);
     return;
   }
@@ -393,49 +367,45 @@ function onState(s: RoomState): void {
 
 net.onRoomState(onState);
 net.onCarsUpdate((update) => {
-  if (!scene) return;
-  // Merge lightweight car fields into local state for HUD
-  if (state) {
-    for (const c of update.cars) {
-      const existing = state.cars.find((x) => x.id === c.id);
-      if (existing) Object.assign(existing, c);
-      else state.cars.push({ ...c, checkpoint: 0 });
-    }
-    if (state.phase === 'racing') {
-      const myCar = state.cars.find((c) => c.id === net.myId());
-      if (myCar?.finishPlace) hudPlace.textContent = `P${myCar.finishPlace}`;
-      else if (myCar) {
-        const sorted = [...state.cars].sort((a, b) => {
-          if (a.finished !== b.finished) return a.finished ? -1 : 1;
-          if (a.laps !== b.laps) return b.laps - a.laps;
-          return b.lapProgress - a.lapProgress;
-        });
-        const place = sorted.findIndex((c) => c.id === net.myId()) + 1;
-        hudPlace.textContent = place ? `P${place}` : '';
-      }
-    }
+  if (!scene || !state) return;
+  for (const c of update.cars) {
+    const existing = state.cars.find((x) => x.id === c.id);
+    if (existing) Object.assign(existing, c);
+    else state.cars.push({ ...c, checkpoint: 0 });
+  }
+  if (state.phase === 'racing') {
+    const myCar = state.cars.find((c) => c.id === net.myId());
+    if (myCar?.finishPlace) hudPlace.textContent = `P${myCar.finishPlace}`;
   }
   scene.applyCarsUpdate(update);
 });
-
 net.onError((msg) => {
   menuError.textContent = msg;
-  hudBanner.textContent = msg;
-  show(hudBanner);
 });
 
-function startInputLoop(): void {
-  if (inputTimer) return;
-  lastPredict = performance.now();
-  inputTimer = window.setInterval(() => {
-    if (!state || !scene) return;
+function startLoop(): void {
+  if (loopTimer) return;
+  lastTick = performance.now();
+  const tick = () => {
+    loopTimer = requestAnimationFrame(tick) as unknown as number;
     const now = performance.now();
-    const dt = Math.min(0.05, (now - lastPredict) / 1000);
-    lastPredict = now;
+    const dt = Math.min(0.05, (now - lastTick) / 1000);
+    lastTick = now;
+    if (!state || !scene) return;
 
     if (state.phase === 'racing') {
-      net.sendInput({ ...keys });
-      scene.predictLocal(keys, dt);
+      scene.tickLocal(keys, dt);
+      poseAccum += dt;
+      if (poseAccum >= 1 / 20) {
+        poseAccum = 0;
+        const pose = scene.getLocalPose();
+        if (pose) {
+          net.sendPose({
+            ...pose,
+            input: { ...keys },
+          });
+        }
+      }
     }
     if (state.phase === 'placing') {
       const me = state.players.find((p) => p.id === net.myId());
@@ -447,7 +417,8 @@ function startInputLoop(): void {
         if (keys.back) scene.moveGhost(0, speed);
       }
     }
-  }, 1000 / 30);
+  };
+  tick();
 }
 
 function bindKey(code: string, down: boolean): void {
@@ -473,12 +444,10 @@ function bindKey(code: string, down: boolean): void {
       break;
   }
 }
-
 window.addEventListener('keydown', (e) => {
   if (e.repeat) return;
   bindKey(e.code, true);
   if (e.code === 'Space') e.preventDefault();
-  if (e.code === 'Enter' && state?.phase === 'placing') void confirmPlace();
   if (e.code === 'Escape' && state?.phase === 'placing') net.skipPlace();
 });
 window.addEventListener('keyup', (e) => bindKey(e.code, false));

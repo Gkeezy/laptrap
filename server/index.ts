@@ -110,6 +110,12 @@ io.on('connection', (socket) => {
     rooms.get(code)?.setInput(socket.id, input);
   });
 
+  socket.on('pose', (pose) => {
+    const code = socketRoom.get(socket.id);
+    if (!code) return;
+    rooms.get(code)?.applyPose(socket.id, pose);
+  });
+
   socket.on('placeObstacle', (payload, cb) => {
     const code = socketRoom.get(socket.id);
     if (!code) {

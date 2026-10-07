@@ -10,6 +10,7 @@ import {
   RoomState,
   CarsUpdate,
   InputState,
+  PoseUpdate,
   CAR_COLORS,
   DEFAULT_TARGET_SCORE,
   MAX_PLAYERS,
@@ -22,19 +23,21 @@ import {
   TrackWorld,
   clampToTrack,
   createStarterTrack,
+  crossedFinishLine,
+  getMarkers,
   getSpawnPose,
   isValidObstaclePlacement,
   placeTrackPiece,
   worldToProgress,
 } from './track.js';
 
-const SIM_HZ = 30;
-const BROADCAST_HZ = 20;
+const SIM_HZ = 20;
+const BROADCAST_HZ = 12;
 const TICK_MS = 1000 / SIM_HZ;
 const BROADCAST_MS = 1000 / BROADCAST_HZ;
 const BOOST_MAX = 100;
-const BOOST_COST = 30;
-const BOOST_RECHARGE = 20;
+const MAX_POSE_SPEED = 70;
+const MAX_POSE_STEP = 18; // units per pose packet (~80ms)
 
 function genCode(): string {
   const alphabet = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
@@ -69,7 +72,8 @@ export class Room {
   private raceStartedAt = 0;
   private prevDist = new Map<string, number>();
   private prevWp = new Map<string, number>();
-  private maxWpReached = new Map<string, number>();
+  private prevPos = new Map<string, { x: number; z: number }>();
+  private passedMid = new Map<string, boolean>();
 
   constructor(
     code: string,
@@ -102,11 +106,10 @@ export class Room {
     if ([...this.players.values()].some((p) => p.name.toLowerCase() === name.toLowerCase())) {
       return { ok: false, error: 'Name taken' };
     }
-    const colorIdx = this.players.size;
     this.players.set(id, {
       id,
       name: name.slice(0, 16) || 'Racer',
-      color: CAR_COLORS[colorIdx % CAR_COLORS.length],
+      color: CAR_COLORS[this.players.size % CAR_COLORS.length],
       score: 0,
       ready: false,
       connected: true,
@@ -132,7 +135,6 @@ export class Room {
     }
 
     if (id === this.hostId) this.promoteHost();
-
     if (this.phase === 'placing') {
       p.hasPlaced = true;
       this.checkPlacingDone();
@@ -192,7 +194,8 @@ export class Room {
     this.countdown = 3;
     this.prevDist.clear();
     this.prevWp.clear();
-    this.maxWpReached.clear();
+    this.prevPos.clear();
+    this.passedMid.clear();
 
     let i = 0;
     for (const p of this.players.values()) {
@@ -210,14 +213,15 @@ export class Room {
         finished: false,
         finishPlace: null,
         lapProgress: prog.progress,
-        checkpoint: Math.floor(prog.progress * 4) % 4,
+        checkpoint: 0,
         laps: 0,
         spinning: 0,
         icy: 0,
       });
       this.prevDist.set(p.id, prog.dist);
       this.prevWp.set(p.id, spawn.wpIndex);
-      this.maxWpReached.set(p.id, spawn.wpIndex);
+      this.prevPos.set(p.id, { x: spawn.x, z: spawn.z });
+      this.passedMid.set(p.id, false);
       this.inputs.set(p.id, { forward: false, back: false, left: false, right: false, boost: false });
     }
 
@@ -257,19 +261,147 @@ export class Room {
     });
   }
 
+  /** Client-authoritative pose with light validation */
+  applyPose(id: string, pose: PoseUpdate): void {
+    if (this.phase !== 'racing') return;
+    const car = this.cars.get(id);
+    if (!car || car.finished) return;
+
+    this.inputs.set(id, {
+      forward: !!pose.input?.forward,
+      back: !!pose.input?.back,
+      left: !!pose.input?.left,
+      right: !!pose.input?.right,
+      boost: !!pose.input?.boost,
+    });
+
+    const dx = pose.x - car.x;
+    const dz = pose.z - car.z;
+    const step = Math.hypot(dx, dz);
+    let x = pose.x;
+    let z = pose.z;
+    let yaw = pose.yaw;
+    let speed = Math.max(-14, Math.min(MAX_POSE_SPEED, pose.speed || 0));
+    let boost = Math.max(0, Math.min(BOOST_MAX, pose.boost ?? car.boost));
+
+    // Reject huge teleports — soft clamp toward claimed pose
+    if (step > MAX_POSE_STEP) {
+      const t = MAX_POSE_STEP / step;
+      x = car.x + dx * t;
+      z = car.z + dz * t;
+    }
+
+    const clamped = clampToTrack(this.track, x, z);
+    if (clamped.hit) {
+      x = clamped.x;
+      z = clamped.z;
+      speed *= 0.96;
+    }
+
+    // Obstacle interactions (server-side effects)
+    if (car.spinning > 0) {
+      car.spinning = Math.max(0, car.spinning - 0.05);
+      yaw += 0.3;
+      speed *= 0.92;
+    }
+    for (const ob of this.obstacles) {
+      const od = Math.hypot(x - ob.x, z - ob.z);
+      if (od > 3.5) continue;
+      if (ob.type === 'barrier' && od < 2.2) {
+        const nx = (x - ob.x) / (od || 1);
+        const nz = (z - ob.z) / (od || 1);
+        x = ob.x + nx * 2.2;
+        z = ob.z + nz * 2.2;
+        speed *= -0.2;
+      } else if (ob.type === 'ice' && od < 2.8) {
+        car.icy = Math.max(car.icy, 1.0);
+      } else if (ob.type === 'boost' && od < 2.5) {
+        speed = Math.max(speed, 34);
+      } else if (ob.type === 'oil' && od < 2.4) {
+        car.spinning = Math.max(car.spinning, 0.7);
+      } else if (ob.type === 'ramp' && od < 2.5) {
+        speed += 4;
+      }
+    }
+    if (car.icy > 0) car.icy = Math.max(0, car.icy - 0.05);
+
+    const prev = this.prevPos.get(id) ?? { x: car.x, z: car.z };
+    car.x = x;
+    car.z = z;
+    car.yaw = yaw;
+    car.speed = speed;
+    car.boost = boost;
+
+    const hint = this.prevWp.get(id) ?? 0;
+    const prog = worldToProgress(this.track, x, z, hint);
+    car.lapProgress = prog.progress;
+    this.prevWp.set(id, prog.wpIndex);
+    this.prevDist.set(id, prog.dist);
+
+    if (prog.progress > 0.45) this.passedMid.set(id, true);
+
+    const minProg = this.track.isLoop ? 0.55 : 0.72;
+    if (
+      (this.passedMid.get(id) || prog.progress > minProg) &&
+      crossedFinishLine(this.track, prev.x, prev.z, x, z, minProg, prog.progress)
+    ) {
+      car.finished = true;
+      car.speed = 0;
+      car.laps = 1;
+      car.finishPlace = this.finishOrder.length + 1;
+      this.finishOrder.push(id);
+      this.checkRaceEnd();
+    }
+
+    this.prevPos.set(id, { x, z });
+  }
+
   private startSim(): void {
     this.stopSim();
-    let last = Date.now();
+    // Lightweight tick: soft car-car separation + timeout only (poses drive motion)
     this.tickTimer = setInterval(() => {
-      const now = Date.now();
-      const dt = Math.min(0.05, (now - last) / 1000);
-      last = now;
-      this.simulate(dt);
+      this.softSeparate();
+      if (this.raceStartedAt && Date.now() - this.raceStartedAt > 120000) {
+        const unfinished = [...this.cars.values()]
+          .filter((c) => !c.finished)
+          .sort((a, b) => b.lapProgress - a.lapProgress);
+        for (const c of unfinished) {
+          c.finished = true;
+          c.speed = 0;
+          c.finishPlace = this.finishOrder.length + 1;
+          this.finishOrder.push(c.id);
+        }
+        this.raceStartedAt = 0;
+        this.endRace();
+      }
     }, TICK_MS);
 
     this.broadcastTimer = setInterval(() => {
       this.emitCars(this.getCarsUpdate());
     }, BROADCAST_MS);
+  }
+
+  private softSeparate(): void {
+    const cars = [...this.cars.values()];
+    for (let i = 0; i < cars.length; i++) {
+      for (let j = i + 1; j < cars.length; j++) {
+        const a = cars[i];
+        const b = cars[j];
+        if (a.finished || b.finished) continue;
+        const dx = b.x - a.x;
+        const dz = b.z - a.z;
+        const d = Math.hypot(dx, dz);
+        if (d < 2.0 && d > 0.01) {
+          const nx = dx / d;
+          const nz = dz / d;
+          const push = (2.0 - d) * 0.15; // gentle
+          a.x -= nx * push;
+          a.z -= nz * push;
+          b.x += nx * push;
+          b.z += nz * push;
+        }
+      }
+    }
   }
 
   private stopSim(): void {
@@ -283,181 +415,16 @@ export class Room {
     }
   }
 
-  private simulate(dt: number): void {
-    const cars = [...this.cars.values()];
-
-    for (const car of cars) {
-      if (car.finished) continue;
-      const input = this.inputs.get(car.id) ?? {
-        forward: false, back: false, left: false, right: false, boost: false,
-      };
-
-      if (car.spinning > 0) {
-        car.spinning -= dt;
-        car.yaw += 6 * dt;
-        car.speed *= Math.max(0, 1 - 1.2 * dt);
-      } else {
-        const turnRate = 2.6 + Math.min(Math.abs(car.speed) * 0.05, 1.2);
-        if (input.left) car.yaw += turnRate * dt;
-        if (input.right) car.yaw -= turnRate * dt;
-
-        const accel = 30;
-        const brake = 42;
-        const maxSpeed = 46;
-        const drag = car.icy > 0 ? 0.35 : 1.0;
-
-        if (input.forward) car.speed += accel * dt;
-        if (input.back) car.speed -= brake * dt;
-
-        let boosting = false;
-        if (input.boost && car.boost > 0 && car.speed > 4) {
-          car.boost = Math.max(0, car.boost - BOOST_COST * dt);
-          car.speed += 26 * dt;
-          boosting = true;
-        }
-        if (!boosting) car.boost = Math.min(BOOST_MAX, car.boost + BOOST_RECHARGE * dt);
-
-        if (car.icy > 0) {
-          car.icy -= dt;
-          car.yaw += Math.sin(Date.now() / 140 + car.id.length) * 0.5 * dt;
-        }
-
-        car.speed *= Math.max(0, 1 - drag * dt);
-        if (!input.forward && !input.back && !boosting) {
-          car.speed *= Math.max(0, 1 - 2.8 * dt);
-        }
-        car.speed = Math.max(-12, Math.min(maxSpeed + (boosting ? 18 : 0), car.speed));
-      }
-
-      const fx = Math.sin(car.yaw);
-      const fz = Math.cos(car.yaw);
-      car.x += fx * car.speed * dt;
-      car.z += fz * car.speed * dt;
-
-      const clamped = clampToTrack(this.track, car.x, car.z);
-      if (clamped.hit) {
-        car.x = clamped.x;
-        car.z = clamped.z;
-        car.speed *= 0.94;
-      }
-
-      for (const ob of this.obstacles) {
-        const dx = car.x - ob.x;
-        const dz = car.z - ob.z;
-        const dist = Math.hypot(dx, dz);
-        if (dist > 3.5) continue;
-        switch (ob.type) {
-          case 'barrier':
-            if (dist < 2.2) {
-              const nx = dx / (dist || 1);
-              const nz = dz / (dist || 1);
-              car.x = ob.x + nx * 2.2;
-              car.z = ob.z + nz * 2.2;
-              car.speed *= -0.25;
-            }
-            break;
-          case 'ice':
-            if (dist < 2.8) car.icy = Math.max(car.icy, 1.1);
-            break;
-          case 'boost':
-            if (dist < 2.5) car.speed = Math.max(car.speed, 36);
-            break;
-          case 'ramp':
-            if (dist < 2.5) car.speed += 6 * dt * 10;
-            break;
-          case 'oil':
-            if (dist < 2.4) car.spinning = Math.max(car.spinning, 0.85);
-            break;
-        }
-      }
-    }
-
-    // Soft car-car separation (less thrash)
-    for (let i = 0; i < cars.length; i++) {
-      for (let j = i + 1; j < cars.length; j++) {
-        const a = cars[i];
-        const b = cars[j];
-        if (a.finished || b.finished) continue;
-        const dx = b.x - a.x;
-        const dz = b.z - a.z;
-        const d = Math.hypot(dx, dz);
-        if (d < 2.2 && d > 0.01) {
-          const nx = dx / d;
-          const nz = dz / d;
-          const push = (2.2 - d) * 0.35;
-          a.x -= nx * push;
-          a.z -= nz * push;
-          b.x += nx * push;
-          b.z += nz * push;
-          const avg = (a.speed + b.speed) * 0.5;
-          a.speed = a.speed * 0.85 + avg * 0.1;
-          b.speed = b.speed * 0.85 + avg * 0.1;
-        }
-      }
-    }
-
-    // Lap progress: monotonic waypoint index along main path
-    const wpCount = this.track.waypoints.length || 1;
-    for (const car of cars) {
-      if (car.finished) continue;
-      const hint = this.prevWp.get(car.id) ?? 0;
-      const prog = worldToProgress(this.track, car.x, car.z, hint);
-      const prevIdx = hint;
-      const maxReached = this.maxWpReached.get(car.id) ?? 0;
-
-      // Detect wrap: were near end, now near start, and had reached far enough
-      const nearEnd = prevIdx >= wpCount * 0.7 || maxReached >= wpCount * 0.7;
-      const nearStart = prog.wpIndex <= wpCount * 0.15;
-      const wrapped = nearEnd && nearStart && prog.wpIndex < prevIdx;
-
-      if (wrapped) {
-        car.laps += 1;
-        car.checkpoint = 0;
-        this.maxWpReached.set(car.id, prog.wpIndex);
-        if (car.laps >= 1) {
-          car.finished = true;
-          car.speed = 0;
-          car.finishPlace = this.finishOrder.length + 1;
-          this.finishOrder.push(car.id);
-          this.checkRaceEnd();
-        }
-      } else {
-        this.maxWpReached.set(car.id, Math.max(maxReached, prog.wpIndex));
-        car.checkpoint = Math.floor((prog.wpIndex / wpCount) * 4) % 4;
-      }
-
-      car.lapProgress = prog.progress;
-      this.prevDist.set(car.id, prog.dist);
-      this.prevWp.set(car.id, prog.wpIndex);
-    }
-
-    if (this.raceStartedAt && Date.now() - this.raceStartedAt > 120000) {
-      const unfinished = [...this.cars.values()]
-        .filter((c) => !c.finished)
-        .sort((a, b) => b.laps - a.laps || b.lapProgress - a.lapProgress);
-      for (const c of unfinished) {
-        c.finished = true;
-        c.speed = 0;
-        c.finishPlace = this.finishOrder.length + 1;
-        this.finishOrder.push(c.id);
-      }
-      this.raceStartedAt = 0;
-      this.endRace();
-    }
-  }
-
   private checkRaceEnd(): void {
     const active = [...this.cars.values()].filter((c) => this.players.get(c.id)?.connected);
-    if (active.length > 0 && active.every((c) => c.finished)) {
-      this.endRace();
-    }
+    if (active.length > 0 && active.every((c) => c.finished)) this.endRace();
   }
 
   private endRace(): void {
     this.stopSim();
     const unfinished = [...this.cars.values()]
       .filter((c) => !c.finished)
-      .sort((a, b) => b.laps - a.laps || b.lapProgress - a.lapProgress);
+      .sort((a, b) => b.lapProgress - a.lapProgress);
     for (const c of unfinished) {
       c.finished = true;
       c.finishPlace = this.finishOrder.length + 1;
@@ -489,9 +456,7 @@ export class Room {
   private beginPlacing(): void {
     this.phase = 'placing';
     this.placeTimeLeft = PLACE_DURATION_SEC;
-    for (const p of this.players.values()) {
-      p.hasPlaced = !p.connected;
-    }
+    for (const p of this.players.values()) p.hasPlaced = !p.connected;
     this.broadcast();
     this.clearPlaceTimer();
     this.placeTimer = setInterval(() => {
@@ -514,11 +479,8 @@ export class Room {
 
   private checkPlacingDone(): void {
     const need = [...this.players.values()].filter((p) => p.connected);
-    if (need.length > 0 && need.every((p) => p.hasPlaced)) {
-      this.finishPlacing();
-    } else {
-      this.broadcast();
-    }
+    if (need.length > 0 && need.every((p) => p.hasPlaced)) this.finishPlacing();
+    else this.broadcast();
   }
 
   private finishPlacing(): void {
@@ -543,7 +505,7 @@ export class Room {
     if (this.phase !== 'placing') return { ok: false, error: 'Not placing phase' };
     const p = this.players.get(id);
     if (!p?.connected) return { ok: false, error: 'Not in room' };
-    if (p.hasPlaced) return { ok: false, error: 'Already placed this round' };
+    if (p.hasPlaced) return { ok: false, error: 'Already placed this round (one item only)' };
     if (!OBSTACLE_TYPES.includes(type)) return { ok: false, error: 'Invalid type' };
     if (!isValidObstaclePlacement(this.track, x, z)) return { ok: false, error: 'Must place on track' };
     if (this.obstacles.length >= 40) return { ok: false, error: 'Too many obstacles' };
@@ -564,7 +526,7 @@ export class Room {
     if (this.phase !== 'placing') return { ok: false, error: 'Not placing phase' };
     const p = this.players.get(id);
     if (!p?.connected) return { ok: false, error: 'Not in room' };
-    if (p.hasPlaced) return { ok: false, error: 'Already placed this round' };
+    if (p.hasPlaced) return { ok: false, error: 'Already placed this round (one item only)' };
     if (!TRACK_PIECE_TYPES.includes(type)) return { ok: false, error: 'Invalid piece' };
 
     const result = placeTrackPiece(this.track, type, socketId, id);
@@ -630,6 +592,7 @@ export class Room {
       obstacles: this.obstacles,
       trackPieces: this.track.pieces,
       trackSockets: this.track.sockets,
+      markers: getMarkers(this.track),
       targetScore: this.targetScore,
       round: this.round,
       placeTimeLeft: this.placeTimeLeft,

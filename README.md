@@ -41,11 +41,11 @@ npm run dev
 ## Game loop
 
 1. **Lobby** — up to 10 players
-2. **Race** — one lap on the current track graph
-3. **Results** — points by place (5/4/3/2/1/1/…)
-4. **Build (simultaneous)** — ~25s timer; each player places **one** trap **or** track piece (straight / curve L / curve R) on a green socket, or skips. When everyone is done (or timer ends) → next race
-5. Track **grows** when a new piece chain reconnects as a longer detour; shorter reconnects act as shortcuts
-6. Win at target score (default 15) **and** finish 1st that race
+2. **Race** — drive from the fixed **START** line to the **FINISH** line (finish sits at the farthest tip of the main path and moves when you extend the track)
+3. **Results** — points by place
+4. **Build (simultaneous, ~25s)** — click to **select** one trap *or* track piece, then **click the map** to place it (exactly one item per player per round). Skip if you want.
+5. Starter map is a **straight line** of 4 pieces with open sockets at both ends. Add curves to grow toward a loop; when a loop closes, start/finish share a gate.
+6. Win at target score **and** finish 1st that race
 
 ## Deploy
 

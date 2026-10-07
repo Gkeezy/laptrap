@@ -4,7 +4,6 @@ export type Phase = 'lobby' | 'countdown' | 'racing' | 'placing' | 'results' | '
 
 export type ObstacleType = 'barrier' | 'ice' | 'boost' | 'ramp' | 'oil';
 export type TrackPieceType = 'straight' | 'curveL' | 'curveR';
-export type BuildItemType = ObstacleType | TrackPieceType;
 
 export const OBSTACLE_TYPES: ObstacleType[] = ['barrier', 'ice', 'boost', 'ramp', 'oil'];
 export const TRACK_PIECE_TYPES: TrackPieceType[] = ['straight', 'curveL', 'curveR'];
@@ -28,17 +27,11 @@ export const CAR_COLORS = [
   '#e67e22', '#1abc9c', '#fd79a8', '#00cec9', '#a29bfe',
 ] as const;
 
-/** Points by finish place (1st index 0). Extra places get 0. */
 export const POINTS_BY_PLACE = [5, 4, 3, 2, 1, 1, 0, 0, 0, 0] as const;
 export const DEFAULT_TARGET_SCORE = 15;
 export const MAX_PLAYERS = 10;
 export const MIN_PLAYERS = 2;
 export const PLACE_DURATION_SEC = 25;
-
-export interface Vec2 {
-  x: number;
-  z: number;
-}
 
 export interface PlayerPublic {
   id: string;
@@ -48,7 +41,6 @@ export interface PlayerPublic {
   ready: boolean;
   connected: boolean;
   isHost: boolean;
-  /** During placing: true once this player has placed or skipped */
   hasPlaced: boolean;
 }
 
@@ -80,24 +72,28 @@ export interface Obstacle {
 export interface TrackPiece {
   id: string;
   type: TrackPieceType;
-  /** Entry pose */
   x: number;
   z: number;
   yaw: number;
   placedBy: string | null;
-  /** True if part of the official lap route */
   onMainPath: boolean;
 }
 
-/** Open connector where a new track piece can snap */
 export interface TrackSocket {
   id: string;
   x: number;
   z: number;
   yaw: number;
   fromPieceId: string;
-  /** 'side' = mid-piece expand; 'end' = free tip of a spur */
   kind: 'side' | 'end';
+}
+
+/** Visible race markers — start fixed, finish at farthest main-path tip */
+export interface RaceMarkers {
+  start: { x: number; z: number; yaw: number };
+  finish: { x: number; z: number; yaw: number };
+  /** True when start/finish are near each other (closed loop) */
+  isLoop: boolean;
 }
 
 export interface RoomState {
@@ -108,9 +104,9 @@ export interface RoomState {
   obstacles: Obstacle[];
   trackPieces: TrackPiece[];
   trackSockets: TrackSocket[];
+  markers: RaceMarkers;
   targetScore: number;
   round: number;
-  /** Seconds left in simultaneous place phase */
   placeTimeLeft: number;
   countdown: number;
   winnerId: string | null;
@@ -119,7 +115,6 @@ export interface RoomState {
   serverTime: number;
 }
 
-/** Lightweight 20 Hz car snapshot */
 export interface CarsUpdate {
   t: number;
   cars: Array<{
@@ -146,12 +141,23 @@ export interface InputState {
   boost: boolean;
 }
 
+/** Client sends authoritative-ish pose; server validates lightly */
+export interface PoseUpdate {
+  x: number;
+  z: number;
+  yaw: number;
+  speed: number;
+  boost: number;
+  input: InputState;
+}
+
 export interface ClientToServerEvents {
   createRoom: (payload: { name: string; targetScore?: number }, cb: (res: { ok: boolean; code?: string; error?: string }) => void) => void;
   joinRoom: (payload: { code: string; name: string }, cb: (res: { ok: boolean; error?: string }) => void) => void;
   setReady: (ready: boolean) => void;
   startGame: () => void;
   input: (input: InputState) => void;
+  pose: (pose: PoseUpdate) => void;
   placeObstacle: (payload: { type: ObstacleType; x: number; z: number; yaw: number }, cb: (res: { ok: boolean; error?: string }) => void) => void;
   placeTrackPiece: (payload: { type: TrackPieceType; socketId: string }, cb: (res: { ok: boolean; error?: string }) => void) => void;
   skipPlace: () => void;
@@ -166,7 +172,6 @@ export interface ServerToClientEvents {
   chat: (payload: { name: string; text: string }) => void;
 }
 
-/** Track geometry constants */
 export const TRACK = {
   width: 10,
   straightLen: 16,

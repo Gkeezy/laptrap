@@ -1,8 +1,8 @@
 /**
  * Piece-based expandable track.
- * Starter = small closed rectangle (4 straights + 4 curveR).
- * Side sockets let players grow spurs; reconnecting a spur to another socket
- * can lengthen the official main path (course grows) or create a shortcut.
+ * Starter = straight line (4 straights). Open end sockets at both tips.
+ * START is fixed at the original entry; FINISH follows the farthest main-path tip.
+ * When pieces reconnect into a loop, markers coincide (combined gate).
  */
 
 import {
@@ -10,25 +10,30 @@ import {
   TrackPiece,
   TrackPieceType,
   TrackSocket,
+  RaceMarkers,
 } from '../shared/types.js';
 
 export interface Waypoint {
   x: number;
   z: number;
   yaw: number;
-  dist: number; // cumulative distance along main path
+  dist: number;
   pieceId: string;
 }
 
 export interface TrackWorld {
   pieces: TrackPiece[];
   sockets: TrackSocket[];
-  /** Ordered main-path piece ids (cycle) */
   mainPath: string[];
   waypoints: Waypoint[];
   totalLength: number;
   pieceSeq: number;
   socketSeq: number;
+  /** Fixed start pose (never moves) */
+  startMarker: { x: number; z: number; yaw: number };
+  /** Finish at farthest tip — updates when path grows */
+  finishMarker: { x: number; z: number; yaw: number };
+  isLoop: boolean;
 }
 
 function forward(yaw: number): { x: number; z: number } {
@@ -45,11 +50,7 @@ export function pieceExit(piece: TrackPiece): { x: number; z: number; yaw: numbe
   const { straightLen: L, curveRadius: R } = TRACK;
   if (piece.type === 'straight') {
     const f = forward(piece.yaw);
-    return {
-      x: piece.x + f.x * L,
-      z: piece.z + f.z * L,
-      yaw: piece.yaw,
-    };
+    return { x: piece.x + f.x * L, z: piece.z + f.z * L, yaw: piece.yaw };
   }
   const sweep = Math.PI / 2;
   const side = piece.type === 'curveL' ? leftOf(piece.yaw) : rightOf(piece.yaw);
@@ -61,17 +62,13 @@ export function pieceExit(piece: TrackPiece): { x: number; z: number; yaw: numbe
   const t = sign * sweep;
   const cos = Math.cos(t);
   const sin = Math.sin(t);
-  // Rotate (relX, relZ) by t in XZ (CCW when sign>0)
-  const rx = relX * cos - relZ * sin;
-  const rz = relX * sin + relZ * cos;
   return {
-    x: cx + rx,
-    z: cz + rz,
+    x: cx + relX * cos - relZ * sin,
+    z: cz + relX * sin + relZ * cos,
     yaw: piece.yaw + t,
   };
 }
 
-/** Sample centerline points for a piece (for collision / progress) */
 export function samplePiece(piece: TrackPiece, steps = 8): Array<{ x: number; z: number; yaw: number }> {
   const pts: Array<{ x: number; z: number; yaw: number }> = [];
   const { straightLen: L, curveRadius: R } = TRACK;
@@ -79,11 +76,7 @@ export function samplePiece(piece: TrackPiece, steps = 8): Array<{ x: number; z:
     const f = forward(piece.yaw);
     for (let i = 0; i <= steps; i++) {
       const t = i / steps;
-      pts.push({
-        x: piece.x + f.x * L * t,
-        z: piece.z + f.z * L * t,
-        yaw: piece.yaw,
-      });
+      pts.push({ x: piece.x + f.x * L * t, z: piece.z + f.z * L * t, yaw: piece.yaw });
     }
     return pts;
   }
@@ -115,7 +108,6 @@ function pieceLength(type: TrackPieceType): number {
 function midSideSocket(piece: TrackPiece): { x: number; z: number; yaw: number } {
   const samples = samplePiece(piece, 4);
   const mid = samples[Math.floor(samples.length / 2)];
-  // Outward = right of travel for clockwise starter (outside of loop)
   const out = rightOf(mid.yaw);
   const half = TRACK.width / 2 + 0.5;
   return {
@@ -144,11 +136,66 @@ function rebuildWaypoints(world: TrackWorld): void {
   world.totalLength = dist || 1;
 }
 
+/** Update finish marker to tip of main path; detect loop if tip reconnects near start */
+function updateMarkers(world: TrackWorld): void {
+  const byId = new Map(world.pieces.map((p) => [p.id, p]));
+  if (!world.mainPath.length) return;
+
+  const lastId = world.mainPath[world.mainPath.length - 1];
+  const last = byId.get(lastId);
+  if (!last) return;
+  const tip = pieceExit(last);
+
+  const dx = tip.x - world.startMarker.x;
+  const dz = tip.z - world.startMarker.z;
+  const nearStart = Math.hypot(dx, dz) < 5;
+  // Also loop if tip is near first piece entry and path is long enough
+  world.isLoop = nearStart && world.mainPath.length >= 6;
+
+  if (world.isLoop) {
+    // Combined gate at start
+    world.finishMarker = { ...world.startMarker };
+  } else {
+    world.finishMarker = { x: tip.x, z: tip.z, yaw: tip.yaw };
+  }
+}
+
 function rebuildSockets(world: TrackWorld): void {
   const sockets: TrackSocket[] = [];
   const byId = new Map(world.pieces.map((p) => [p.id, p]));
 
-  // Side sockets on every piece (outward) — free if nothing attached nearby
+  // End sockets: free tips of main path (both ends for open line)
+  if (world.mainPath.length && !world.isLoop) {
+    const firstId = world.mainPath[0];
+    const lastId = world.mainPath[world.mainPath.length - 1];
+    const first = byId.get(firstId);
+    const last = byId.get(lastId);
+    if (first) {
+      // Backward tip: opposite of entry yaw
+      const backYaw = first.yaw + Math.PI;
+      sockets.push({
+        id: `sock-${world.socketSeq++}`,
+        x: first.x,
+        z: first.z,
+        yaw: backYaw,
+        fromPieceId: first.id,
+        kind: 'end',
+      });
+    }
+    if (last) {
+      const tip = pieceExit(last);
+      sockets.push({
+        id: `sock-${world.socketSeq++}`,
+        x: tip.x,
+        z: tip.z,
+        yaw: tip.yaw,
+        fromPieceId: last.id,
+        kind: 'end',
+      });
+    }
+  }
+
+  // Side sockets
   for (const piece of world.pieces) {
     const side = midSideSocket(piece);
     const occupied = world.pieces.some((other) => {
@@ -167,7 +214,7 @@ function rebuildSockets(world: TrackWorld): void {
     }
   }
 
-  // Free ends: pieces not on main path whose exit isn't near another piece entry
+  // Free ends of non-main spurs
   for (const piece of world.pieces) {
     if (piece.onMainPath) continue;
     const exit = pieceExit(piece);
@@ -190,6 +237,14 @@ function rebuildSockets(world: TrackWorld): void {
   world.sockets = sockets;
 }
 
+export function getMarkers(world: TrackWorld): RaceMarkers {
+  return {
+    start: { ...world.startMarker },
+    finish: { ...world.finishMarker },
+    isLoop: world.isLoop,
+  };
+}
+
 export function createStarterTrack(): TrackWorld {
   const world: TrackWorld = {
     pieces: [],
@@ -199,44 +254,48 @@ export function createStarterTrack(): TrackWorld {
     totalLength: 0,
     pieceSeq: 0,
     socketSeq: 0,
+    startMarker: { x: 0, z: 0, yaw: 0 },
+    finishMarker: { x: 0, z: 0, yaw: 0 },
+    isLoop: false,
   };
 
-  // Clockwise rectangle: start bottom-left, go +X, turn right at each corner
-  let x = -TRACK.straightLen / 2;
-  let z = -TRACK.curveRadius - TRACK.straightLen / 2;
-  let yaw = Math.PI / 2; // +X
+  // Straight line along +Z: 4 straights
+  let x = 0;
+  let z = -TRACK.straightLen * 2;
+  let yaw = 0; // +Z
 
-  const add = (type: TrackPieceType) => {
+  world.startMarker = { x, z, yaw };
+
+  for (let i = 0; i < 4; i++) {
     const id = `tp-${++world.pieceSeq}`;
-    const piece: TrackPiece = { id, type, x, z, yaw, placedBy: null, onMainPath: true };
+    const piece: TrackPiece = { id, type: 'straight', x, z, yaw, placedBy: null, onMainPath: true };
     world.pieces.push(piece);
     world.mainPath.push(id);
     const exit = pieceExit(piece);
     x = exit.x;
     z = exit.z;
     yaw = exit.yaw;
-  };
-
-  for (let i = 0; i < 4; i++) {
-    add('straight');
-    add('curveR');
   }
 
   rebuildWaypoints(world);
+  updateMarkers(world);
   rebuildSockets(world);
   return world;
 }
 
 export function getSpawnPose(world: TrackWorld, index: number): { x: number; z: number; yaw: number; wpIndex: number } {
   const wps = world.waypoints;
-  if (!wps.length) return { x: 0, z: 0, yaw: 0, wpIndex: 0 };
+  if (!wps.length) {
+    const s = world.startMarker;
+    return { x: s.x, z: s.z, yaw: s.yaw, wpIndex: 0 };
+  }
+  // Grid just AFTER the start line
   const lane = (index % 2 === 0 ? -1 : 1) * (2.0 + Math.floor(index / 2) * 0.1);
-  const back = Math.floor(index / 2) * 3.0;
-  const d = Math.min(world.totalLength * 0.12, 5 + back);
+  const forwardDist = 3 + Math.floor(index / 2) * 2.8;
   let wp = wps[0];
   let wpIndex = 0;
   for (let i = 0; i < wps.length; i++) {
-    if (wps[i].dist >= d) {
+    if (wps[i].dist >= forwardDist) {
       wp = wps[i];
       wpIndex = i;
       break;
@@ -273,15 +332,12 @@ export function worldToProgress(
       best = i;
     }
   }
-  // Never move backward along the route except when wrapping finish→start
-  const goingBackward = best < prev && !(prev > n * 0.7 && best < n * 0.15);
+  const goingBackward = best < prev && !(world.isLoop && prev > n * 0.7 && best < n * 0.15);
   if (goingBackward) {
     best = prev;
     bestD = Math.hypot(wps[prev].x - x, wps[prev].z - z);
   }
 
-  // Off-main asphalt: if closer to a spur sample than main path, keep main hint index
-  // but allow onTrack=true
   let nearestDist = bestD;
   for (const piece of world.pieces) {
     if (piece.onMainPath) continue;
@@ -292,17 +348,46 @@ export function worldToProgress(
   }
 
   const halfW = TRACK.width / 2 + 1.2;
-  const onTrack = nearestDist <= halfW;
-  const dist = wps[best].dist;
-  const progress = dist / world.totalLength;
-  return { progress, dist, onTrack, nearestDist, wpIndex: best };
+  return {
+    progress: wps[best].dist / world.totalLength,
+    dist: wps[best].dist,
+    onTrack: nearestDist <= halfW,
+    nearestDist,
+    wpIndex: best,
+  };
+}
+
+/** Crossing finish: was behind finish plane, now in front, along path */
+export function crossedFinishLine(
+  world: TrackWorld,
+  prevX: number,
+  prevZ: number,
+  x: number,
+  z: number,
+  minProgress = 0.55,
+  currentProgress = 0,
+): boolean {
+  if (currentProgress < minProgress && !world.isLoop) {
+    // Point-to-point: must be most of the way along the path
+    if (currentProgress < 0.7) return false;
+  }
+  if (world.isLoop && currentProgress < 0.55) return false;
+
+  const fin = world.finishMarker;
+  const f = forward(fin.yaw);
+  // Plane at finish facing along travel: signed distance along forward
+  const prevDot = (prevX - fin.x) * f.x + (prevZ - fin.z) * f.z;
+  const nowDot = (x - fin.x) * f.x + (z - fin.z) * f.z;
+  // Crossed from behind (negative) to ahead (positive)
+  if (!(prevDot < 0.5 && nowDot >= 0)) return false;
+  // Must be laterally near the finish strip
+  const lateral = leftOf(fin.yaw);
+  const lat = (x - fin.x) * lateral.x + (z - fin.z) * lateral.z;
+  return Math.abs(lat) < TRACK.width / 2 + 1.5;
 }
 
 export function clampToTrack(world: TrackWorld, x: number, z: number): { x: number; z: number; hit: boolean } {
-  const wps = world.waypoints;
   const halfW = TRACK.width / 2;
-
-  // Gather sample points from all pieces
   let bestX = x;
   let bestZ = z;
   let bestD = Infinity;
@@ -322,16 +407,10 @@ export function clampToTrack(world: TrackWorld, x: number, z: number): { x: numb
     for (const s of samplePiece(piece, 12)) consider(s.x, s.z, s.yaw);
   }
 
-  if (bestD <= halfW) {
-    return { x, z, hit: false };
-  }
+  if (bestD <= halfW) return { x, z, hit: false };
 
-  // Project onto centerline then push to edge
   const lateral = leftOf(bestYaw);
-  // vector from centerline to car
-  let dx = x - bestX;
-  let dz = z - bestZ;
-  let lat = dx * lateral.x + dz * lateral.z;
+  let lat = (x - bestX) * lateral.x + (z - bestZ) * lateral.z;
   lat = Math.max(-halfW, Math.min(halfW, lat));
   return {
     x: bestX + lateral.x * lat,
@@ -364,8 +443,6 @@ export function placeTrackPiece(
     onMainPath: false,
   };
 
-  // Avoid overlapping existing pieces too heavily
-  const exit = pieceExit(piece);
   for (const other of world.pieces) {
     if (Math.hypot(other.x - piece.x, other.z - piece.z) < 2) {
       return { ok: false, error: 'Blocked' };
@@ -373,8 +450,30 @@ export function placeTrackPiece(
   }
 
   world.pieces.push(piece);
+  const exit = pieceExit(piece);
 
-  // Try to snap exit to a nearby socket / piece entry → close spur
+  // Extending from a main-path END socket → grow main path + move finish
+  if (sock.kind === 'end') {
+    const lastId = world.mainPath[world.mainPath.length - 1];
+    const firstId = world.mainPath[0];
+    if (sock.fromPieceId === lastId) {
+      // Extending forward tip
+      piece.onMainPath = true;
+      world.mainPath.push(piece.id);
+    } else if (sock.fromPieceId === firstId) {
+      // Extending backward from start — prepend, keep start marker fixed
+      // New piece entry is behind start; we still keep startMarker at original
+      piece.onMainPath = true;
+      world.mainPath.unshift(piece.id);
+      // Rebuild path direction: if we prepend going backward, path order may be wrong.
+      // For simplicity: only allow forward tip to extend main finish; backward extends
+      // as spur unless it forms a loop. Revert prepend — treat as spur from start end.
+      world.mainPath.shift();
+      piece.onMainPath = false;
+    }
+  }
+
+  // Snap reconnect
   const snapR = 4.5;
   let reconnectedTo: string | null = null;
   for (const other of world.pieces) {
@@ -384,12 +483,10 @@ export function placeTrackPiece(
       break;
     }
   }
-  // Also snap to open sockets
   if (!reconnectedTo) {
     for (const s of world.sockets) {
       if (s.id === socketId) continue;
       if (Math.hypot(s.x - exit.x, s.z - exit.z) < snapR) {
-        // Find piece at that socket's origin for reconnection target
         reconnectedTo = s.fromPieceId;
         break;
       }
@@ -398,28 +495,38 @@ export function placeTrackPiece(
 
   if (reconnectedTo) {
     tryGrowMainPath(world, sock.fromPieceId, piece.id, reconnectedTo);
+  } else if (piece.onMainPath) {
+    // Already added to main path as tip extension
   }
 
   rebuildWaypoints(world);
+  updateMarkers(world);
   rebuildSockets(world);
   return { ok: true };
 }
 
-/**
- * If new spur from `fromPiece` through `newPiece` reconnects near `toPiece`,
- * and the detour is longer than the old main-path span, adopt it as main path.
- */
 function tryGrowMainPath(world: TrackWorld, fromPieceId: string, newPieceId: string, toPieceId: string): void {
   const path = world.mainPath;
   const fromIdx = path.indexOf(fromPieceId);
   const toIdx = path.indexOf(toPieceId);
-  if (fromIdx < 0 || toIdx < 0) {
-    // Reconnected to a non-main piece — just leave as asphalt spur
-    return;
+  const byId = new Map(world.pieces.map((p) => [p.id, p]));
+  const np = byId.get(newPieceId);
+
+  // Connecting back near start → close loop
+  if (toIdx === 0 || toPieceId === path[0]) {
+    if (fromIdx === path.length - 1 || fromPieceId === path[path.length - 1]) {
+      if (np) {
+        np.onMainPath = true;
+        if (!path.includes(newPieceId)) path.push(newPieceId);
+      }
+      world.isLoop = true;
+      return;
+    }
   }
+
+  if (fromIdx < 0 || toIdx < 0) return;
   if (fromIdx === toIdx) return;
 
-  // Old forward span along main path from fromIdx to toIdx
   const n = path.length;
   const oldSpanIds: string[] = [];
   for (let i = (fromIdx + 1) % n; i !== toIdx; i = (i + 1) % n) {
@@ -427,44 +534,27 @@ function tryGrowMainPath(world: TrackWorld, fromPieceId: string, newPieceId: str
     if (oldSpanIds.length > n) break;
   }
 
-  const byId = new Map(world.pieces.map((p) => [p.id, p]));
   const lenOf = (ids: string[]) =>
     ids.reduce((acc, id) => acc + pieceLength(byId.get(id)?.type ?? 'straight'), 0);
-
   const oldLen = lenOf(oldSpanIds);
   const newLen = pieceLength(byId.get(newPieceId)?.type ?? 'straight');
 
-  // Only grow if detour is meaningfully longer (course expands)
-  if (newLen > oldLen + 2) {
-    // Replace old span with new piece
+  if (newLen > oldLen + 2 || oldSpanIds.length === 0) {
     const newPath: string[] = [];
     for (let i = 0; i < n; i++) {
       const id = path[i];
       if (id === fromPieceId) {
         newPath.push(id);
         newPath.push(newPieceId);
-        // skip until toIdx
         continue;
       }
       if (oldSpanIds.includes(id)) continue;
       newPath.push(id);
     }
-    // Mark flags
-    for (const p of world.pieces) {
-      p.onMainPath = newPath.includes(p.id);
-    }
-    const np = byId.get(newPieceId);
+    for (const p of world.pieces) p.onMainPath = newPath.includes(p.id);
     if (np) np.onMainPath = true;
     world.mainPath = newPath;
-  } else {
-    // Shortcut: leave main path, new piece is optional asphalt
-    const np = byId.get(newPieceId);
-    if (np) np.onMainPath = false;
+  } else if (np) {
+    np.onMainPath = false;
   }
-}
-
-export function finishLinePose(world: TrackWorld): { x: number; z: number; yaw: number } {
-  const wp = world.waypoints[0];
-  if (!wp) return { x: 0, z: 0, yaw: 0 };
-  return { x: wp.x, z: wp.z, yaw: wp.yaw };
 }
