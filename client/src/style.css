@@ -300,3 +300,53 @@ input {
 #track-picks { display: flex; flex-wrap: wrap; gap: 8px; justify-content: center; margin: 10px 0; }
 #track-picks.hidden { display: none !important; }
 #player-list { max-height: 280px; overflow-y: auto; }
+
+.place-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 6px;
+}
+.icon-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(72px, 1fr));
+  gap: 8px;
+  margin: 10px 0;
+  max-width: 520px;
+}
+.icon-grid.hidden { display: none !important; }
+.icon-btn {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  padding: 10px 6px;
+  min-height: 72px;
+  border-radius: 12px;
+  border: 2px solid var(--border);
+  background: #1c2a45;
+  color: var(--text);
+  cursor: pointer;
+  font-weight: 700;
+  font-size: 0.7rem;
+  line-height: 1.1;
+  pointer-events: auto;
+}
+.icon-btn .ico { font-size: 1.6rem; line-height: 1; }
+.icon-btn.selected {
+  border-color: var(--accent2);
+  background: #1a3d32;
+  box-shadow: 0 0 0 2px rgba(62, 207, 142, 0.35);
+}
+.icon-btn.death {
+  border-color: #c0392b55;
+}
+.icon-btn.death.selected {
+  border-color: #e74c3c;
+  background: #3d1a1a;
+}
+#place-ui {
+  width: min(560px, 96vw);
+}

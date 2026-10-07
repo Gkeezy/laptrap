@@ -4,7 +4,7 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
     <title>Laptrap — Race, Trap, Repeat</title>
-    <meta name="description" content="Browser multiplayer trap-racing. Race a lap, place obstacles, race again." />
+    <meta name="description" content="Browser multiplayer trap-racing. Race, place traps, build the track." />
     <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🏎️</text></svg>" />
   </head>
   <body>
@@ -12,7 +12,7 @@
       <div id="menu" class="panel-screen">
         <div class="menu-card">
           <h1>LAPTRAP</h1>
-          <p class="tagline">Race · Trap · Race again</p>
+          <p class="tagline">Race · Trap · Build · Race again</p>
           <label>Your name
             <input id="player-name" maxlength="16" placeholder="Racer" autocomplete="off" />
           </label>
@@ -24,14 +24,14 @@
             </div>
           </div>
           <p id="menu-error" class="error"></p>
-          <p class="hint">Share the room link so friends can jump in.</p>
+          <p class="hint">Share the room link so friends can jump in. Fall off the track = out!</p>
         </div>
       </div>
 
       <div id="lobby" class="panel-screen hidden">
         <div class="menu-card wide">
           <h2>Lobby</h2>
-          <p>Room <strong id="lobby-code"></strong> · Target <span id="lobby-target">9</span> pts</p>
+          <p>Room <strong id="lobby-code"></strong> · Target <span id="lobby-target">15</span> pts</p>
           <p class="share">Share: <a id="lobby-link" href="#"></a>
             <button id="btn-copy" class="btn tiny">Copy</button>
           </p>
@@ -58,15 +58,17 @@
           <div id="hud-banner" class="hidden"></div>
           <div id="scoreboard"></div>
           <div id="place-ui" class="hidden">
-            <p id="place-turn"></p>
-            <p id="place-timer" class="timer"></p>
+            <div class="place-header">
+              <p id="place-turn"></p>
+              <p id="place-timer" class="timer"></p>
+            </div>
             <div class="place-tabs">
               <button id="tab-trap" class="btn tiny selected" type="button">Traps</button>
-              <button id="tab-track" class="btn tiny" type="button">Track pieces</button>
+              <button id="tab-track" class="btn tiny" type="button">Track</button>
             </div>
-            <div id="obstacle-picks"></div>
-            <div id="track-picks" class="hidden"></div>
-            <p class="hint" id="place-hint">1) Click an item to select · 2) Click the map to place (one per round) · Esc skip</p>
+            <div id="obstacle-picks" class="icon-grid"></div>
+            <div id="track-picks" class="icon-grid hidden"></div>
+            <p class="hint" id="place-hint">Select an item, then left-click the map to place · Esc skip</p>
             <button id="btn-skip-place" class="btn">Skip</button>
           </div>
           <div id="results-overlay" class="hidden"></div>

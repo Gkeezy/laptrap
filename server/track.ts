@@ -424,6 +424,51 @@ export function isValidObstaclePlacement(world: TrackWorld, x: number, z: number
   return onTrack && nearestDist < TRACK.width / 2 - 1;
 }
 
+
+/** True if within asphalt half-width of any piece centerline */
+export function isOnAsphalt(world: TrackWorld, x: number, z: number): boolean {
+  const halfW = TRACK.width / 2 + 0.35;
+  let best = Infinity;
+  for (const piece of world.pieces) {
+    for (const s of samplePiece(piece, 10)) {
+      const d = Math.hypot(s.x - x, s.z - z);
+      if (d < best) best = d;
+    }
+  }
+  return best <= halfW;
+}
+
+/** Surface height at position (ramps raise the road) — base 0 */
+export function surfaceHeightAt(
+  world: TrackWorld,
+  obstacles: Array<{ type: string; x: number; z: number; yaw: number }>,
+  x: number,
+  z: number,
+): { y: number; rampBoost: number } {
+  let y = 0;
+  let rampBoost = 0;
+  for (const ob of obstacles) {
+    if (ob.type !== 'ramp') continue;
+    const dx = x - ob.x;
+    const dz = z - ob.z;
+    // Local coords along ramp facing
+    const fx = Math.sin(ob.yaw);
+    const fz = Math.cos(ob.yaw);
+    const along = dx * fx + dz * fz;
+    const lat = dx * (-fz) + dz * fx; // rough lateral
+    if (Math.abs(lat) < 2.2 && along > -1.2 && along < 3.5) {
+      // Rising slope: 0 at entry → ~2.2 at crest
+      const t = Math.max(0, Math.min(1, (along + 1.2) / 4.5));
+      const h = t * 2.4;
+      if (h > y) {
+        y = h;
+        rampBoost = 14 + t * 18; // upward kick when on ramp face
+      }
+    }
+  }
+  return { y, rampBoost };
+}
+
 export function placeTrackPiece(
   world: TrackWorld,
   type: TrackPieceType,
@@ -444,7 +489,9 @@ export function placeTrackPiece(
   };
 
   for (const other of world.pieces) {
-    if (Math.hypot(other.x - piece.x, other.z - piece.z) < 2) {
+    if (other.id === sock.fromPieceId) continue;
+    // Allow attaching at an exit tip; only reject near-duplicate entries
+    if (Math.hypot(other.x - piece.x, other.z - piece.z) < 2.5) {
       return { ok: false, error: 'Blocked' };
     }
   }

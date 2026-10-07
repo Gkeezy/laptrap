@@ -2,24 +2,61 @@
 
 export type Phase = 'lobby' | 'countdown' | 'racing' | 'placing' | 'results' | 'gameover';
 
-export type ObstacleType = 'barrier' | 'ice' | 'boost' | 'ramp' | 'oil';
+export type ObstacleType =
+  | 'barrier'
+  | 'ice'
+  | 'boost'
+  | 'ramp'
+  | 'oil'
+  | 'bomb'
+  | 'spikes'
+  | 'mine';
+
 export type TrackPieceType = 'straight' | 'curveL' | 'curveR';
 
-export const OBSTACLE_TYPES: ObstacleType[] = ['barrier', 'ice', 'boost', 'ramp', 'oil'];
+export const OBSTACLE_TYPES: ObstacleType[] = [
+  'barrier', 'ice', 'boost', 'ramp', 'oil', 'bomb', 'spikes', 'mine',
+];
+
+/** Non-lethal utility traps */
+export const UTILITY_TRAPS: ObstacleType[] = ['barrier', 'ice', 'boost', 'ramp', 'oil'];
+/** Lethal death traps */
+export const DEATH_TRAPS: ObstacleType[] = ['bomb', 'spikes', 'mine'];
+
 export const TRACK_PIECE_TYPES: TrackPieceType[] = ['straight', 'curveL', 'curveR'];
 
 export const OBSTACLE_LABELS: Record<ObstacleType, string> = {
   barrier: 'Barrier',
-  ice: 'Ice Patch',
-  boost: 'Boost Pad',
+  ice: 'Ice',
+  boost: 'Boost',
   ramp: 'Ramp',
-  oil: 'Oil Slick',
+  oil: 'Oil',
+  bomb: 'Bomb',
+  spikes: 'Spikes',
+  mine: 'Mine',
+};
+
+export const OBSTACLE_ICONS: Record<ObstacleType, string> = {
+  barrier: '🧱',
+  ice: '🧊',
+  boost: '🚀',
+  ramp: '📐',
+  oil: '🛢️',
+  bomb: '💣',
+  spikes: '☠️',
+  mine: '⚫',
 };
 
 export const TRACK_PIECE_LABELS: Record<TrackPieceType, string> = {
   straight: 'Straight',
-  curveL: 'Curve Left',
-  curveR: 'Curve Right',
+  curveL: 'Curve L',
+  curveR: 'Curve R',
+};
+
+export const TRACK_PIECE_ICONS: Record<TrackPieceType, string> = {
+  straight: '➖',
+  curveL: '↩️',
+  curveR: '↪️',
 };
 
 export const CAR_COLORS = [
@@ -47,11 +84,17 @@ export interface PlayerPublic {
 export interface CarState {
   id: string;
   x: number;
+  y: number;
   z: number;
   yaw: number;
   speed: number;
   boost: number;
+  vy: number;
+  airborne: boolean;
   finished: boolean;
+  /** DNF / death / fell off */
+  eliminated: boolean;
+  eliminateReason: string | null;
   finishPlace: number | null;
   lapProgress: number;
   checkpoint: number;
@@ -67,6 +110,8 @@ export interface Obstacle {
   z: number;
   yaw: number;
   placedBy: string;
+  /** Bomb already detonated this race */
+  spent?: boolean;
 }
 
 export interface TrackPiece {
@@ -88,11 +133,9 @@ export interface TrackSocket {
   kind: 'side' | 'end';
 }
 
-/** Visible race markers — start fixed, finish at farthest main-path tip */
 export interface RaceMarkers {
   start: { x: number; z: number; yaw: number };
   finish: { x: number; z: number; yaw: number };
-  /** True when start/finish are near each other (closed loop) */
   isLoop: boolean;
 }
 
@@ -120,11 +163,16 @@ export interface CarsUpdate {
   cars: Array<{
     id: string;
     x: number;
+    y: number;
     z: number;
     yaw: number;
     speed: number;
     boost: number;
+    vy: number;
+    airborne: boolean;
     finished: boolean;
+    eliminated: boolean;
+    eliminateReason: string | null;
     finishPlace: number | null;
     lapProgress: number;
     laps: number;
@@ -141,13 +189,15 @@ export interface InputState {
   boost: boolean;
 }
 
-/** Client sends authoritative-ish pose; server validates lightly */
 export interface PoseUpdate {
   x: number;
+  y: number;
   z: number;
   yaw: number;
   speed: number;
   boost: number;
+  vy: number;
+  airborne: boolean;
   input: InputState;
 }
 

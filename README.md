@@ -27,6 +27,13 @@ npm run dev
 2. Share that link (2–**10** players)
 3. Ready up; host starts
 
+## Track & hazards
+
+- Starter is a **straight line**; **START** is fixed, **FINISH** follows the farthest tip.
+- **No side rails** — drive off the asphalt and you’re out for the round (DNF).
+- Place **utility** traps (barrier, ice, boost, ramp, oil) or **death** traps (bomb, spikes, mine).
+- **Ramps** launch you into the air.
+
 ## Controls
 
 | Action | Keyboard | Mobile |

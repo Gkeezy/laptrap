@@ -22,15 +22,18 @@ interface Snapshot {
 interface CarRender {
   mesh: THREE.Group;
   buffer: Snapshot[];
-  // Local authoritative state (only for local player)
   localX: number;
+  localY: number;
   localZ: number;
   localYaw: number;
   localSpeed: number;
   localBoost: number;
+  localVy: number;
+  airborne: boolean;
   spinning: number;
   icy: number;
   initialized: boolean;
+  eliminated: boolean;
 }
 
 function lerpAngle(a: number, b: number, t: number): number {
@@ -185,10 +188,28 @@ export class GameScene {
         return m;
       }
       case 'ramp': {
-        const m = new THREE.Mesh(new THREE.BoxGeometry(2.4, 0.8, 2.2), new THREE.MeshLambertMaterial({ color: 0x9b59b6 }));
-        m.position.y = 0.2;
-        m.rotation.x = -0.35;
-        return m;
+        const g = new THREE.Group();
+        // Wedge ramp mesh
+        const shape = new THREE.Shape();
+        shape.moveTo(0, 0);
+        shape.lineTo(4.5, 0);
+        shape.lineTo(4.5, 0.15);
+        shape.lineTo(0, 2.2);
+        shape.lineTo(0, 0);
+        const geo = new THREE.ExtrudeGeometry(shape, { depth: 3.6, bevelEnabled: false });
+        geo.rotateY(-Math.PI / 2);
+        geo.translate(0, 0, -1.8);
+        const m = new THREE.Mesh(geo, new THREE.MeshLambertMaterial({ color: 0x9b59b6 }));
+        g.add(m);
+        // Arrow paint
+        const arrow = new THREE.Mesh(
+          new THREE.BoxGeometry(0.4, 0.08, 2.2),
+          new THREE.MeshBasicMaterial({ color: 0xf1c40f }),
+        );
+        arrow.position.set(0, 1.1, 0.2);
+        arrow.rotation.x = -0.4;
+        g.add(arrow);
+        return g;
       }
       case 'oil': {
         const m = new THREE.Mesh(
@@ -198,6 +219,58 @@ export class GameScene {
         m.position.y = 0.08;
         return m;
       }
+      case 'bomb': {
+        const g = new THREE.Group();
+        const body = new THREE.Mesh(
+          new THREE.SphereGeometry(0.85, 16, 12),
+          new THREE.MeshLambertMaterial({ color: 0x222222 }),
+        );
+        body.position.y = 0.85;
+        g.add(body);
+        const fuse = new THREE.Mesh(
+          new THREE.CylinderGeometry(0.08, 0.08, 0.5, 6),
+          new THREE.MeshLambertMaterial({ color: 0xc0392b }),
+        );
+        fuse.position.y = 1.85;
+        g.add(fuse);
+        return g;
+      }
+      case 'spikes': {
+        const g = new THREE.Group();
+        const base = new THREE.Mesh(
+          new THREE.BoxGeometry(3.2, 0.15, 3.2),
+          new THREE.MeshLambertMaterial({ color: 0x7f8c8d }),
+        );
+        base.position.y = 0.08;
+        g.add(base);
+        for (let i = -1; i <= 1; i++) {
+          for (let j = -1; j <= 1; j++) {
+            const spike = new THREE.Mesh(
+              new THREE.ConeGeometry(0.35, 1.4, 6),
+              new THREE.MeshLambertMaterial({ color: 0xbdc3c7 }),
+            );
+            spike.position.set(i * 1.0, 0.8, j * 1.0);
+            g.add(spike);
+          }
+        }
+        return g;
+      }
+      case 'mine': {
+        const g = new THREE.Group();
+        const disc = new THREE.Mesh(
+          new THREE.CylinderGeometry(1.1, 1.1, 0.25, 16),
+          new THREE.MeshLambertMaterial({ color: 0x27ae60 }),
+        );
+        disc.position.y = 0.15;
+        g.add(disc);
+        const skull = new THREE.Mesh(
+          new THREE.SphereGeometry(0.35, 10, 8),
+          new THREE.MeshLambertMaterial({ color: 0xf1c40f }),
+        );
+        skull.position.y = 0.45;
+        g.add(skull);
+        return g;
+      }
     }
   }
 
@@ -206,8 +279,7 @@ export class GameScene {
     const samples = samplePieceLocal(piece, 10);
     const halfW = TRACK.width / 2;
     const mat = new THREE.MeshLambertMaterial({ color: piece.onMainPath ? 0x2a2e35 : 0x3a4555 });
-    const wallMat = new THREE.MeshLambertMaterial({ color: 0x8e9aab });
-    for (let i = 0; i < samples.length - 1; i++) {
+        for (let i = 0; i < samples.length - 1; i++) {
       const a = samples[i];
       const b = samples[i + 1];
       const dx = b.x - a.x;
@@ -218,13 +290,6 @@ export class GameScene {
       seg.position.set((a.x + b.x) / 2, 0.08, (a.z + b.z) / 2);
       seg.rotation.y = yaw;
       g.add(seg);
-      const left = { x: -Math.cos(yaw), z: Math.sin(yaw) };
-      for (const sign of [-1, 1]) {
-        const wall = new THREE.Mesh(new THREE.BoxGeometry(0.35, 0.9, len + 0.05), wallMat);
-        wall.position.set((a.x + b.x) / 2 + left.x * halfW * sign, 0.45, (a.z + b.z) / 2 + left.z * halfW * sign);
-        wall.rotation.y = yaw;
-        g.add(wall);
-      }
       if (i % 2 === 0) {
         const dash = new THREE.Mesh(
           new THREE.BoxGeometry(0.25, 0.05, Math.min(1.2, len * 0.6)),
@@ -389,15 +454,24 @@ export class GameScene {
         // Only hard-set local on countdown / first init
         if (!cr.initialized || state.phase === 'countdown') {
           cr.localX = car.x;
+          cr.localY = car.y || 0;
           cr.localZ = car.z;
           cr.localYaw = car.yaw;
           cr.localSpeed = 0;
           cr.localBoost = car.boost;
+          cr.localVy = 0;
+          cr.airborne = false;
           cr.spinning = 0;
           cr.icy = 0;
+          cr.eliminated = false;
           cr.initialized = true;
-          cr.mesh.position.set(car.x, 0, car.z);
+          cr.mesh.position.set(car.x, cr.localY, car.z);
           cr.mesh.rotation.y = car.yaw;
+          cr.mesh.visible = true;
+        }
+        if (car.eliminated) {
+          cr.eliminated = true;
+          cr.mesh.visible = false;
         }
       } else {
         cr.buffer.push({ x: car.x, z: car.z, yaw: car.yaw, t: now });
@@ -435,14 +509,18 @@ export class GameScene {
     for (const car of update.cars) {
       const cr = this.cars.get(car.id);
       if (!cr) continue;
+      if (car.eliminated) {
+        cr.eliminated = true;
+        cr.mesh.visible = false;
+        continue;
+      }
       if (car.id === this.localId) {
-        // Local is client-authoritative — ignore position; sync boost/status only
         cr.localBoost = car.boost;
         if (car.finished) cr.localSpeed = 0;
-        // Only correct if wildly desynced (anti-cheat / rubber-band rare)
         const err = Math.hypot(car.x - cr.localX, car.z - cr.localZ);
         if (err > 25) {
           cr.localX = car.x;
+          cr.localY = car.y || 0;
           cr.localZ = car.z;
           cr.localYaw = car.yaw;
           cr.localSpeed = car.speed;
@@ -450,6 +528,8 @@ export class GameScene {
       } else {
         cr.buffer.push({ x: car.x, z: car.z, yaw: car.yaw, t: now });
         while (cr.buffer.length > 40) cr.buffer.shift();
+        // store y on mesh directly via userData
+        cr.mesh.userData.y = car.y || 0;
       }
     }
   }
@@ -463,33 +543,58 @@ export class GameScene {
       mesh,
       buffer: [{ x: car.x, z: car.z, yaw: car.yaw, t: now }],
       localX: car.x,
+      localY: car.y || 0,
       localZ: car.z,
       localYaw: car.yaw,
       localSpeed: 0,
       localBoost: 100,
+      localVy: 0,
+      airborne: false,
       spinning: 0,
       icy: 0,
       initialized: false,
+      eliminated: false,
     });
   }
 
   /** Client-side physics for local car — source of truth for feel */
-  tickLocal(input: InputState, dt: number): void {
+  tickLocal(input: InputState, dt: number, obstacles: Obstacle[] = []): { fellOff: boolean } {
     const cr = this.cars.get(this.localId);
-    if (!cr || !this.racing) return;
+    if (!cr || !this.racing || cr.eliminated) return { fellOff: false };
+
+    // Ramp surface sample
+    let surfY = 0;
+    let onRamp = false;
+    let rampKick = 0;
+    for (const ob of obstacles) {
+      if (ob.type !== 'ramp') continue;
+      const dx = cr.localX - ob.x;
+      const dz = cr.localZ - ob.z;
+      const fx = Math.sin(ob.yaw);
+      const fz = Math.cos(ob.yaw);
+      const along = dx * fx + dz * fz;
+      const lat = -dx * fz + dz * fx;
+      if (Math.abs(lat) < 2.2 && along > -1.2 && along < 3.5) {
+        const t = Math.max(0, Math.min(1, (along + 1.2) / 4.5));
+        const h = t * 2.4;
+        if (h >= surfY) {
+          surfY = h;
+          onRamp = true;
+          rampKick = 12 + t * 20;
+        }
+      }
+    }
 
     if (cr.spinning > 0) {
       cr.spinning -= dt;
       cr.localYaw += 5 * dt;
       cr.localSpeed *= Math.max(0, 1 - 1.2 * dt);
-    } else {
+    } else if (!cr.airborne) {
       const turnRate = 2.5 + Math.min(Math.abs(cr.localSpeed) * 0.05, 1.1);
       if (input.left) cr.localYaw += turnRate * dt;
       if (input.right) cr.localYaw -= turnRate * dt;
-
       if (input.forward) cr.localSpeed += 30 * dt;
       if (input.back) cr.localSpeed -= 40 * dt;
-
       let boosting = false;
       if (input.boost && cr.localBoost > 0 && cr.localSpeed > 4) {
         cr.localBoost = Math.max(0, cr.localBoost - 30 * dt);
@@ -497,12 +602,10 @@ export class GameScene {
         boosting = true;
       }
       if (!boosting) cr.localBoost = Math.min(100, cr.localBoost + 20 * dt);
-
       if (cr.icy > 0) {
         cr.icy -= dt;
         cr.localYaw += Math.sin(performance.now() / 140) * 0.45 * dt;
       }
-
       cr.localSpeed *= Math.max(0, 1 - 1.0 * dt);
       if (!input.forward && !input.back && !boosting) cr.localSpeed *= Math.max(0, 1 - 2.5 * dt);
       cr.localSpeed = Math.max(-12, Math.min(50 + (boosting ? 16 : 0), cr.localSpeed));
@@ -511,46 +614,65 @@ export class GameScene {
     cr.localX += Math.sin(cr.localYaw) * cr.localSpeed * dt;
     cr.localZ += Math.cos(cr.localYaw) * cr.localSpeed * dt;
 
-    // Soft local clamp to asphalt samples
-    this.softClampLocal(cr);
-  }
+    // Ramp launch
+    if (onRamp && !cr.airborne && cr.localSpeed > 8 && rampKick > 0) {
+      cr.localVy = Math.max(cr.localVy, rampKick * 0.5);
+      cr.localSpeed += 6;
+      cr.airborne = true;
+      cr.localY = Math.max(cr.localY, surfY + 0.15);
+    }
 
-  private softClampLocal(cr: CarRender): void {
-    let bestD = Infinity;
-    let bestX = cr.localX;
-    let bestZ = cr.localZ;
-    let bestYaw = cr.localYaw;
-    for (const piece of this.pieces) {
-      for (const s of samplePieceLocal(piece, 8)) {
-        const d = Math.hypot(s.x - cr.localX, s.z - cr.localZ);
-        if (d < bestD) {
-          bestD = d;
-          bestX = s.x;
-          bestZ = s.z;
-          bestYaw = s.yaw;
-        }
+    if (cr.airborne || cr.localY > surfY + 0.05) {
+      cr.localVy -= 32 * dt;
+      cr.localY += cr.localVy * dt;
+      if (cr.localY <= surfY) {
+        cr.localY = surfY;
+        cr.localVy = 0;
+        cr.airborne = false;
+      } else {
+        cr.airborne = true;
+      }
+    } else {
+      cr.localY = surfY;
+      cr.localVy = 0;
+      cr.airborne = false;
+    }
+
+    // Soft stay near asphalt while grounded — if far, signal fall-off
+    if (!cr.airborne && cr.localY < 0.5) {
+      const off = this.distanceOffAsphalt(cr.localX, cr.localZ);
+      if (off > TRACK.width / 2 + 0.6) {
+        return { fellOff: true };
       }
     }
-    const halfW = TRACK.width / 2;
-    if (bestD > halfW) {
-      const left = { x: -Math.cos(bestYaw), z: Math.sin(bestYaw) };
-      let lat = (cr.localX - bestX) * left.x + (cr.localZ - bestZ) * left.z;
-      lat = Math.max(-halfW, Math.min(halfW, lat));
-      cr.localX = bestX + left.x * lat;
-      cr.localZ = bestZ + left.z * lat;
-      cr.localSpeed *= 0.97;
-    }
+    return { fellOff: false };
   }
 
-  getLocalPose(): { x: number; z: number; yaw: number; speed: number; boost: number } | null {
+  private distanceOffAsphalt(x: number, z: number): number {
+    let best = Infinity;
+    for (const piece of this.pieces) {
+      for (const s of samplePieceLocal(piece, 8)) {
+        const d = Math.hypot(s.x - x, s.z - z);
+        if (d < best) best = d;
+      }
+    }
+    return best;
+  }
+
+  getLocalPose(): {
+    x: number; y: number; z: number; yaw: number; speed: number; boost: number; vy: number; airborne: boolean;
+  } | null {
     const cr = this.cars.get(this.localId);
     if (!cr) return null;
     return {
       x: cr.localX,
+      y: cr.localY,
       z: cr.localZ,
       yaw: cr.localYaw,
       speed: cr.localSpeed,
       boost: cr.localBoost,
+      vy: cr.localVy,
+      airborne: cr.airborne,
     };
   }
 
@@ -619,6 +741,40 @@ export class GameScene {
     return { kind: best ? 'socket' : 'ground', socketId: this.selectedSocketId };
   }
 
+  /** Move ghost under cursor; snap to nearest socket within range */
+  updateGhostCursor(x: number, z: number, preferSocket: boolean): void {
+    this.ghostPos.x = x;
+    this.ghostPos.z = z;
+    if (preferSocket) {
+      let best: TrackSocket | null = null;
+      let bestD = 8;
+      for (const s of this.sockets) {
+        const d = Math.hypot(s.x - x, s.z - z);
+        if (d < bestD) { bestD = d; best = s; }
+      }
+      if (best) {
+        this.selectedSocketId = best.id;
+        this.ghostPos.x = best.x;
+        this.ghostPos.z = best.z;
+        this.ghostPos.yaw = best.yaw;
+      } else {
+        this.selectedSocketId = null;
+      }
+    } else {
+      this.selectedSocketId = null;
+    }
+    for (const [id, mesh] of this.socketMeshes) {
+      const selected = id === this.selectedSocketId;
+      (mesh as THREE.Mesh).material = new THREE.MeshBasicMaterial({
+        color: selected ? 0xff5a36 : 0x3ecf8e,
+        transparent: true,
+        opacity: selected ? 0.95 : 0.55,
+      });
+      mesh.visible = this.placing;
+    }
+    this.updateGhostVisibility();
+  }
+
   screenToTrack(clientX: number, clientY: number): { x: number; z: number } | null {
     const rect = this.canvas.getBoundingClientRect();
     const ndc = new THREE.Vector2(
@@ -654,8 +810,12 @@ export class GameScene {
     const renderTime = now - this.renderDelayMs;
     for (const [id, cr] of this.cars) {
       if (!cr.mesh.visible) continue;
+      if (cr.eliminated) {
+        cr.mesh.visible = false;
+        continue;
+      }
       if (id === this.localId) {
-        cr.mesh.position.set(cr.localX, 0, cr.localZ);
+        cr.mesh.position.set(cr.localX, cr.localY, cr.localZ);
         cr.mesh.rotation.y = cr.localYaw;
         continue;
       }
@@ -674,7 +834,8 @@ export class GameScene {
       const b = buf[Math.min(buf.length - 1, i + 1)];
       const span = Math.max(1, b.t - a.t);
       const t = Math.min(1, Math.max(0, (renderTime - a.t) / span));
-      cr.mesh.position.set(a.x + (b.x - a.x) * t, 0, a.z + (b.z - a.z) * t);
+      const yy = (cr.mesh.userData.y as number) || 0;
+      cr.mesh.position.set(a.x + (b.x - a.x) * t, yy, a.z + (b.z - a.z) * t);
       cr.mesh.rotation.y = lerpAngle(a.yaw, b.yaw, t);
     }
   }
