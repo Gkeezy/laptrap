@@ -30,7 +30,7 @@ app.get('/api/health', (_req, res) => {
 });
 
 // Serve Vite build in production
-const distPath = path.resolve(__dirname, '../dist');
+const distPath = path.resolve(__dirname, '../../dist');
 app.use(express.static(distPath));
 app.get('*', (req, res, next) => {
   if (req.path.startsWith('/api') || req.path.startsWith('/socket.io')) return next();
