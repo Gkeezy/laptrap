@@ -1,0 +1,89 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+    <title>Laptrap — Race, Trap, Repeat</title>
+    <meta name="description" content="Browser multiplayer trap-racing. Race a lap, place obstacles, race again." />
+    <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🏎️</text></svg>" />
+  </head>
+  <body>
+    <div id="app">
+      <div id="menu" class="panel-screen">
+        <div class="menu-card">
+          <h1>LAPTRAP</h1>
+          <p class="tagline">Race · Trap · Race again</p>
+          <label>Your name
+            <input id="player-name" maxlength="16" placeholder="Racer" autocomplete="off" />
+          </label>
+          <div class="menu-actions">
+            <button id="btn-create" class="btn primary">Create Room</button>
+            <div class="join-row">
+              <input id="join-code" maxlength="6" placeholder="CODE" autocomplete="off" />
+              <button id="btn-join" class="btn">Join</button>
+            </div>
+          </div>
+          <p id="menu-error" class="error"></p>
+          <p class="hint">Share the room link so friends can jump in.</p>
+        </div>
+      </div>
+
+      <div id="lobby" class="panel-screen hidden">
+        <div class="menu-card wide">
+          <h2>Lobby</h2>
+          <p>Room <strong id="lobby-code"></strong> · Target <span id="lobby-target">9</span> pts</p>
+          <p class="share">Share: <a id="lobby-link" href="#"></a>
+            <button id="btn-copy" class="btn tiny">Copy</button>
+          </p>
+          <ul id="player-list"></ul>
+          <div class="menu-actions">
+            <button id="btn-ready" class="btn">Ready</button>
+            <button id="btn-start" class="btn primary hidden">Start Race</button>
+            <button id="btn-leave" class="btn danger">Leave</button>
+          </div>
+          <p id="lobby-msg" class="hint"></p>
+        </div>
+      </div>
+
+      <div id="game-root" class="hidden">
+        <canvas id="game-canvas"></canvas>
+        <div id="hud">
+          <div id="hud-top">
+            <span id="hud-phase"></span>
+            <span id="hud-round"></span>
+            <span id="hud-place"></span>
+            <span id="hud-score"></span>
+          </div>
+          <div id="hud-countdown" class="hidden"></div>
+          <div id="hud-banner" class="hidden"></div>
+          <div id="scoreboard"></div>
+          <div id="place-ui" class="hidden">
+            <p id="place-turn"></p>
+            <div id="obstacle-picks"></div>
+            <p class="hint">Click track to place · WASD move ghost · Enter confirm · Esc skip</p>
+            <button id="btn-confirm-place" class="btn primary">Place</button>
+            <button id="btn-skip-place" class="btn">Skip</button>
+          </div>
+          <div id="results-overlay" class="hidden"></div>
+          <div id="gameover-overlay" class="hidden">
+            <h2 id="winner-text"></h2>
+            <button id="btn-rematch" class="btn primary hidden">Rematch</button>
+            <button id="btn-home" class="btn">Main Menu</button>
+          </div>
+        </div>
+        <div id="mobile-controls" class="hidden">
+          <div class="mc-left">
+            <button data-key="left">◀</button>
+            <button data-key="right">▶</button>
+          </div>
+          <div class="mc-right">
+            <button data-key="boost">BOOST</button>
+            <button data-key="forward">▲</button>
+            <button data-key="back">▼</button>
+          </div>
+        </div>
+      </div>
+    </div>
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>

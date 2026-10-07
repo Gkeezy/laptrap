@@ -1,0 +1,11 @@
+services:
+  - type: web
+    name: laptrap
+    runtime: node
+    plan: free
+    buildCommand: npm install && npm run build
+    startCommand: node dist-server/server/index.js
+    healthCheckPath: /api/health
+    envVars:
+      - key: NODE_VERSION
+        value: "20"

@@ -1,0 +1,295 @@
+:root {
+  --bg: #0b1220;
+  --card: #141e33;
+  --accent: #ff5a36;
+  --accent2: #3ecf8e;
+  --text: #e8eefc;
+  --muted: #8b9bb8;
+  --danger: #e74c3c;
+  --border: #24314d;
+  font-family: "Segoe UI", system-ui, sans-serif;
+}
+
+* { box-sizing: border-box; margin: 0; padding: 0; }
+
+html, body, #app {
+  width: 100%;
+  height: 100%;
+  overflow: hidden;
+  background: radial-gradient(ellipse at top, #152238, var(--bg));
+  color: var(--text);
+}
+
+.hidden { display: none !important; }
+
+.panel-screen {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 16px;
+  z-index: 20;
+}
+
+.menu-card {
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: 16px;
+  padding: 28px 24px;
+  width: min(400px, 100%);
+  box-shadow: 0 20px 60px rgba(0,0,0,0.45);
+}
+
+.menu-card.wide { width: min(480px, 100%); }
+
+h1 {
+  font-size: 2.6rem;
+  letter-spacing: 0.12em;
+  text-align: center;
+  color: var(--accent);
+  text-shadow: 0 0 24px rgba(255,90,54,0.35);
+}
+
+h2 { margin-bottom: 8px; }
+
+.tagline {
+  text-align: center;
+  color: var(--muted);
+  margin-bottom: 20px;
+}
+
+label {
+  display: block;
+  font-size: 0.85rem;
+  color: var(--muted);
+  margin-bottom: 14px;
+}
+
+input {
+  display: block;
+  width: 100%;
+  margin-top: 6px;
+  padding: 10px 12px;
+  border-radius: 8px;
+  border: 1px solid var(--border);
+  background: #0d1526;
+  color: var(--text);
+  font-size: 1rem;
+}
+
+.join-row {
+  display: flex;
+  gap: 8px;
+}
+.join-row input {
+  margin-top: 0;
+  text-transform: uppercase;
+  letter-spacing: 0.15em;
+  font-weight: 700;
+}
+
+.menu-actions {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  margin-top: 8px;
+}
+
+.btn {
+  appearance: none;
+  border: 1px solid var(--border);
+  background: #1c2a45;
+  color: var(--text);
+  padding: 10px 16px;
+  border-radius: 10px;
+  font-weight: 600;
+  cursor: pointer;
+  font-size: 0.95rem;
+}
+.btn:hover { filter: brightness(1.1); }
+.btn.primary { background: var(--accent); border-color: transparent; color: #fff; }
+.btn.danger { background: transparent; border-color: var(--danger); color: var(--danger); }
+.btn.tiny { padding: 4px 8px; font-size: 0.75rem; display: inline; }
+.btn:disabled { opacity: 0.5; cursor: not-allowed; }
+
+.error { color: var(--danger); min-height: 1.2em; margin-top: 8px; font-size: 0.9rem; }
+.hint { color: var(--muted); font-size: 0.8rem; margin-top: 12px; }
+.share { font-size: 0.85rem; margin: 8px 0 12px; word-break: break-all; }
+.share a { color: var(--accent2); }
+
+#player-list {
+  list-style: none;
+  margin: 12px 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+#player-list li {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 10px;
+  background: #0d1526;
+  border-radius: 8px;
+  border: 1px solid var(--border);
+}
+.swatch {
+  width: 14px; height: 14px; border-radius: 50%;
+  box-shadow: 0 0 8px currentColor;
+}
+.badge {
+  margin-left: auto;
+  font-size: 0.75rem;
+  color: var(--muted);
+}
+.badge.ready { color: var(--accent2); font-weight: 700; }
+
+#game-root {
+  position: absolute;
+  inset: 0;
+}
+#game-canvas {
+  display: block;
+  width: 100%;
+  height: 100%;
+}
+
+#hud {
+  pointer-events: none;
+  position: absolute;
+  inset: 0;
+}
+#hud-top {
+  display: flex;
+  gap: 16px;
+  flex-wrap: wrap;
+  padding: 12px 16px;
+  background: linear-gradient(to bottom, rgba(0,0,0,0.55), transparent);
+  font-weight: 700;
+  font-size: 0.95rem;
+  letter-spacing: 0.04em;
+}
+
+#hud-countdown {
+  position: absolute;
+  top: 35%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  font-size: 6rem;
+  font-weight: 900;
+  text-shadow: 0 8px 30px rgba(0,0,0,0.6);
+  color: #fff;
+}
+
+#hud-banner {
+  position: absolute;
+  top: 22%;
+  left: 50%;
+  transform: translateX(-50%);
+  background: rgba(0,0,0,0.65);
+  padding: 10px 20px;
+  border-radius: 10px;
+  font-size: 1.2rem;
+  font-weight: 700;
+}
+
+#scoreboard {
+  position: absolute;
+  top: 56px;
+  right: 12px;
+  background: rgba(10,16,28,0.75);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 8px 10px;
+  min-width: 140px;
+  font-size: 0.8rem;
+}
+#scoreboard div {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 2px 0;
+}
+
+#place-ui {
+  pointer-events: auto;
+  position: absolute;
+  bottom: 16px;
+  left: 50%;
+  transform: translateX(-50%);
+  background: rgba(10,16,28,0.9);
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  padding: 14px 16px;
+  width: min(520px, 94vw);
+  text-align: center;
+}
+#obstacle-picks {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  justify-content: center;
+  margin: 10px 0;
+}
+#obstacle-picks button {
+  pointer-events: auto;
+}
+#obstacle-picks button.selected {
+  outline: 2px solid var(--accent2);
+  background: #1a3d32;
+}
+#place-ui .btn { margin: 4px; pointer-events: auto; }
+
+#results-overlay, #gameover-overlay {
+  pointer-events: auto;
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+  background: rgba(5,10,20,0.72);
+  text-align: center;
+  padding: 20px;
+}
+#results-overlay h2, #gameover-overlay h2 { font-size: 2rem; }
+
+#mobile-controls {
+  pointer-events: none;
+  position: absolute;
+  inset: 0;
+}
+#mobile-controls button {
+  pointer-events: auto;
+  width: 64px;
+  height: 64px;
+  border-radius: 14px;
+  border: 1px solid rgba(255,255,255,0.25);
+  background: rgba(20,30,50,0.55);
+  color: #fff;
+  font-size: 1.2rem;
+  font-weight: 700;
+  touch-action: none;
+}
+.mc-left, .mc-right {
+  position: absolute;
+  bottom: 24px;
+  display: flex;
+  gap: 10px;
+  align-items: flex-end;
+}
+.mc-left { left: 16px; }
+.mc-right { right: 16px; flex-direction: column; }
+#mobile-controls button[data-key="boost"] {
+  width: 90px;
+  background: rgba(255,90,54,0.55);
+}
+
+@media (pointer: fine) {
+  #mobile-controls { display: none !important; }
+}
+@media (pointer: coarse) {
+  #mobile-controls:not(.hidden) { display: block; }
+}
