@@ -59,8 +59,14 @@
           <div id="scoreboard"></div>
           <div id="place-ui" class="hidden">
             <p id="place-turn"></p>
+            <p id="place-timer" class="timer"></p>
+            <div class="place-tabs">
+              <button id="tab-trap" class="btn tiny selected" type="button">Traps</button>
+              <button id="tab-track" class="btn tiny" type="button">Track pieces</button>
+            </div>
             <div id="obstacle-picks"></div>
-            <p class="hint">Click track to place · WASD move ghost · Enter confirm · Esc skip</p>
+            <div id="track-picks" class="hidden"></div>
+            <p class="hint" id="place-hint">Click asphalt to place a trap · Esc skip</p>
             <button id="btn-confirm-place" class="btn primary">Place</button>
             <button id="btn-skip-place" class="btn">Skip</button>
           </div>

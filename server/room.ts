@@ -3,28 +3,38 @@ import {
   CarState,
   Obstacle,
   ObstacleType,
+  TrackPieceType,
   Phase,
   PlayerPublic,
   POINTS_BY_PLACE,
   RoomState,
+  CarsUpdate,
   InputState,
   CAR_COLORS,
   DEFAULT_TARGET_SCORE,
   MAX_PLAYERS,
   MIN_PLAYERS,
   OBSTACLE_TYPES,
+  TRACK_PIECE_TYPES,
+  PLACE_DURATION_SEC,
 } from '../shared/types.js';
 import {
+  TrackWorld,
   clampToTrack,
+  createStarterTrack,
   getSpawnPose,
-  isValidPlacement,
+  isValidObstaclePlacement,
+  placeTrackPiece,
   worldToProgress,
 } from './track.js';
 
-const TICK_MS = 1000 / 30;
+const SIM_HZ = 30;
+const BROADCAST_HZ = 20;
+const TICK_MS = 1000 / SIM_HZ;
+const BROADCAST_MS = 1000 / BROADCAST_HZ;
 const BOOST_MAX = 100;
-const BOOST_COST = 35; // per second
-const BOOST_RECHARGE = 18;
+const BOOST_COST = 30;
+const BOOST_RECHARGE = 20;
 
 function genCode(): string {
   const alphabet = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
@@ -44,22 +54,37 @@ export class Room {
   cars = new Map<string, CarState>();
   inputs = new Map<string, InputState>();
   obstacles: Obstacle[] = [];
-  placingQueue: string[] = [];
-  placingPlayerId: string | null = null;
+  track: TrackWorld;
   countdown = 0;
+  placeTimeLeft = 0;
   winnerId: string | null = null;
   finishOrder: string[] = [];
   private tickTimer: ReturnType<typeof setInterval> | null = null;
+  private broadcastTimer: ReturnType<typeof setInterval> | null = null;
   private countdownTimer: ReturnType<typeof setInterval> | null = null;
-  private emit: (state: RoomState) => void;
+  private placeTimer: ReturnType<typeof setInterval> | null = null;
+  private emitState: (state: RoomState) => void;
+  private emitCars: (update: CarsUpdate) => void;
   private obstacleSeq = 0;
   private raceStartedAt = 0;
+  private prevDist = new Map<string, number>();
+  private prevWp = new Map<string, number>();
+  private maxWpReached = new Map<string, number>();
 
-  constructor(code: string, hostId: string, hostName: string, targetScore: number, emit: (s: RoomState) => void) {
+  constructor(
+    code: string,
+    hostId: string,
+    hostName: string,
+    targetScore: number,
+    emitState: (s: RoomState) => void,
+    emitCars: (u: CarsUpdate) => void,
+  ) {
     this.code = code;
     this.hostId = hostId;
     this.targetScore = targetScore;
-    this.emit = emit;
+    this.emitState = emitState;
+    this.emitCars = emitCars;
+    this.track = createStarterTrack();
     this.addPlayer(hostId, hostName);
   }
 
@@ -73,12 +98,12 @@ export class Room {
 
   addPlayer(id: string, name: string): { ok: boolean; error?: string } {
     if (this.phase !== 'lobby') return { ok: false, error: 'Game already started' };
-    if (this.players.size >= MAX_PLAYERS) return { ok: false, error: 'Room is full' };
+    if (this.players.size >= MAX_PLAYERS) return { ok: false, error: 'Room is full (10)' };
     if ([...this.players.values()].some((p) => p.name.toLowerCase() === name.toLowerCase())) {
       return { ok: false, error: 'Name taken' };
     }
     const colorIdx = this.players.size;
-    const player: PlayerPublic = {
+    this.players.set(id, {
       id,
       name: name.slice(0, 16) || 'Racer',
       color: CAR_COLORS[colorIdx % CAR_COLORS.length],
@@ -86,18 +111,10 @@ export class Room {
       ready: false,
       connected: true,
       isHost: id === this.hostId,
-    };
-    this.players.set(id, player);
+      hasPlaced: false,
+    });
     this.broadcast();
     return { ok: true };
-  }
-
-  reconnect(id: string): void {
-    const p = this.players.get(id);
-    if (p) {
-      p.connected = true;
-      this.broadcast();
-    }
   }
 
   removePlayer(id: string): boolean {
@@ -114,20 +131,19 @@ export class Room {
       return this.players.size === 0;
     }
 
-    // Mid-game: mark disconnected, promote host if needed
     if (id === this.hostId) this.promoteHost();
 
-    // If placing and it was their turn, skip
-    if (this.phase === 'placing' && this.placingPlayerId === id) {
-      this.advancePlacing();
+    if (this.phase === 'placing') {
+      p.hasPlaced = true;
+      this.checkPlacingDone();
     }
 
-    // If fewer than 2 connected, end
     const connected = [...this.players.values()].filter((x) => x.connected).length;
     if (connected < 1) return true;
     if (connected < MIN_PLAYERS && this.phase !== 'gameover') {
       this.phase = 'gameover';
-      this.stopTick();
+      this.stopSim();
+      this.clearPlaceTimer();
       this.winnerId = [...this.players.values()].find((x) => x.connected)?.id ?? null;
       this.broadcast();
     } else {
@@ -156,32 +172,34 @@ export class Room {
     if (this.phase !== 'lobby') return { ok: false, error: 'Not in lobby' };
     const connected = [...this.players.values()].filter((p) => p.connected);
     if (connected.length < MIN_PLAYERS) return { ok: false, error: `Need at least ${MIN_PLAYERS} players` };
-    if (!connected.every((p) => p.ready || p.id === this.hostId)) {
-      // Allow host to start if all others ready; host auto-ready
-      const othersReady = connected.filter((p) => p.id !== this.hostId).every((p) => p.ready);
-      if (!othersReady) return { ok: false, error: 'All players must be ready' };
-    }
+    const othersReady = connected.filter((p) => p.id !== this.hostId).every((p) => p.ready);
+    if (!othersReady) return { ok: false, error: 'All players must be ready' };
     for (const p of this.players.values()) p.ready = true;
     this.round = 0;
     this.obstacles = [];
+    this.track = createStarterTrack();
     this.beginRace();
     return { ok: true };
   }
 
   private beginRace(): void {
+    this.clearPlaceTimer();
     this.round += 1;
     this.finishOrder = [];
     this.winnerId = null;
-    this.placingQueue = [];
-    this.placingPlayerId = null;
+    this.placeTimeLeft = 0;
     this.phase = 'countdown';
     this.countdown = 3;
+    this.prevDist.clear();
+    this.prevWp.clear();
+    this.maxWpReached.clear();
 
     let i = 0;
     for (const p of this.players.values()) {
+      p.hasPlaced = false;
       if (!p.connected) continue;
-      const spawn = getSpawnPose(i++);
-      const startProg = worldToProgress(spawn.x, spawn.z);
+      const spawn = getSpawnPose(this.track, i++);
+      const prog = worldToProgress(this.track, spawn.x, spawn.z, spawn.wpIndex);
       this.cars.set(p.id, {
         id: p.id,
         x: spawn.x,
@@ -191,12 +209,15 @@ export class Room {
         boost: BOOST_MAX,
         finished: false,
         finishPlace: null,
-        lapProgress: startProg,
-        checkpoint: Math.floor(startProg * 4) % 4,
+        lapProgress: prog.progress,
+        checkpoint: Math.floor(prog.progress * 4) % 4,
         laps: 0,
         spinning: 0,
         icy: 0,
       });
+      this.prevDist.set(p.id, prog.dist);
+      this.prevWp.set(p.id, spawn.wpIndex);
+      this.maxWpReached.set(p.id, spawn.wpIndex);
       this.inputs.set(p.id, { forward: false, back: false, left: false, right: false, boost: false });
     }
 
@@ -209,7 +230,7 @@ export class Room {
         this.phase = 'racing';
         this.countdown = 0;
         this.raceStartedAt = Date.now();
-        this.startTick();
+        this.startSim();
         this.broadcast();
       } else {
         this.broadcast();
@@ -236,22 +257,29 @@ export class Room {
     });
   }
 
-  private startTick(): void {
-    this.stopTick();
+  private startSim(): void {
+    this.stopSim();
     let last = Date.now();
     this.tickTimer = setInterval(() => {
       const now = Date.now();
       const dt = Math.min(0.05, (now - last) / 1000);
       last = now;
       this.simulate(dt);
-      this.broadcast();
     }, TICK_MS);
+
+    this.broadcastTimer = setInterval(() => {
+      this.emitCars(this.getCarsUpdate());
+    }, BROADCAST_MS);
   }
 
-  private stopTick(): void {
+  private stopSim(): void {
     if (this.tickTimer) {
       clearInterval(this.tickTimer);
       this.tickTimer = null;
+    }
+    if (this.broadcastTimer) {
+      clearInterval(this.broadcastTimer);
+      this.broadcastTimer = null;
     }
   }
 
@@ -266,17 +294,17 @@ export class Room {
 
       if (car.spinning > 0) {
         car.spinning -= dt;
-        car.yaw += 8 * dt;
-        car.speed *= Math.max(0, 1 - 1.5 * dt);
+        car.yaw += 6 * dt;
+        car.speed *= Math.max(0, 1 - 1.2 * dt);
       } else {
-        const turnRate = 2.8 + Math.min(Math.abs(car.speed) * 0.06, 1.4);
+        const turnRate = 2.6 + Math.min(Math.abs(car.speed) * 0.05, 1.2);
         if (input.left) car.yaw += turnRate * dt;
         if (input.right) car.yaw -= turnRate * dt;
 
-        const accel = 32;
-        const brake = 45;
-        const maxSpeed = 48;
-        const drag = car.icy > 0 ? 0.4 : 1.2;
+        const accel = 30;
+        const brake = 42;
+        const maxSpeed = 46;
+        const drag = car.icy > 0 ? 0.35 : 1.0;
 
         if (input.forward) car.speed += accel * dt;
         if (input.back) car.speed -= brake * dt;
@@ -284,54 +312,35 @@ export class Room {
         let boosting = false;
         if (input.boost && car.boost > 0 && car.speed > 4) {
           car.boost = Math.max(0, car.boost - BOOST_COST * dt);
-          car.speed += 28 * dt;
+          car.speed += 26 * dt;
           boosting = true;
         }
         if (!boosting) car.boost = Math.min(BOOST_MAX, car.boost + BOOST_RECHARGE * dt);
 
         if (car.icy > 0) {
           car.icy -= dt;
-          car.yaw += (Math.sin(Date.now() / 120 + car.id.length) * 0.8) * dt;
+          car.yaw += Math.sin(Date.now() / 140 + car.id.length) * 0.5 * dt;
         }
 
-        // Exponential drag toward coast
         car.speed *= Math.max(0, 1 - drag * dt);
         if (!input.forward && !input.back && !boosting) {
-          car.speed *= Math.max(0, 1 - 3 * dt);
+          car.speed *= Math.max(0, 1 - 2.8 * dt);
         }
-        car.speed = Math.max(-14, Math.min(maxSpeed + (boosting ? 20 : 0), car.speed));
+        car.speed = Math.max(-12, Math.min(maxSpeed + (boosting ? 18 : 0), car.speed));
       }
 
-      // Forward vector: yaw 0 faces +Z
       const fx = Math.sin(car.yaw);
       const fz = Math.cos(car.yaw);
       car.x += fx * car.speed * dt;
       car.z += fz * car.speed * dt;
 
-      // Walls — slide along ring instead of killing speed
-      const beforeX = car.x;
-      const beforeZ = car.z;
-      const clamped = clampToTrack(car.x, car.z);
-      if (clamped.x !== beforeX || clamped.z !== beforeZ) {
+      const clamped = clampToTrack(this.track, car.x, car.z);
+      if (clamped.hit) {
         car.x = clamped.x;
         car.z = clamped.z;
-        // Cancel only the outward radial component of velocity
-        const r = Math.hypot(car.x, car.z) || 1;
-        const nx = car.x / r;
-        const nz = car.z / r;
-        const radialVel = (fx * nx + fz * nz) * car.speed;
-        if (radialVel > 0 && r > 30) car.speed *= 0.92;
-        else if (radialVel < 0 && r < 26) car.speed *= 0.92;
-        // Nudge yaw toward tangent so arcade driving recovers
-        const a = Math.atan2(car.z, car.x);
-        const want = Math.atan2(-Math.sin(a), Math.cos(a));
-        let dy = want - car.yaw;
-        while (dy > Math.PI) dy -= Math.PI * 2;
-        while (dy < -Math.PI) dy += Math.PI * 2;
-        car.yaw += dy * 0.08;
+        car.speed *= 0.94;
       }
 
-      // Obstacles
       for (const ob of this.obstacles) {
         const dx = car.x - ob.x;
         const dz = car.z - ob.z;
@@ -340,31 +349,30 @@ export class Room {
         switch (ob.type) {
           case 'barrier':
             if (dist < 2.2) {
-              // push out
               const nx = dx / (dist || 1);
               const nz = dz / (dist || 1);
               car.x = ob.x + nx * 2.2;
               car.z = ob.z + nz * 2.2;
-              car.speed *= -0.3;
+              car.speed *= -0.25;
             }
             break;
           case 'ice':
-            if (dist < 2.8) car.icy = Math.max(car.icy, 1.2);
+            if (dist < 2.8) car.icy = Math.max(car.icy, 1.1);
             break;
           case 'boost':
-            if (dist < 2.5) car.speed = Math.max(car.speed, 38);
+            if (dist < 2.5) car.speed = Math.max(car.speed, 36);
             break;
           case 'ramp':
-            if (dist < 2.5) car.speed = Math.max(car.speed, car.speed + 8);
+            if (dist < 2.5) car.speed += 6 * dt * 10;
             break;
           case 'oil':
-            if (dist < 2.4) car.spinning = Math.max(car.spinning, 1.0);
+            if (dist < 2.4) car.spinning = Math.max(car.spinning, 0.85);
             break;
         }
       }
     }
 
-    // Car-car bumps
+    // Soft car-car separation (less thrash)
     for (let i = 0; i < cars.length; i++) {
       for (let j = i + 1; j < cars.length; j++) {
         const a = cars[i];
@@ -373,33 +381,39 @@ export class Room {
         const dx = b.x - a.x;
         const dz = b.z - a.z;
         const d = Math.hypot(dx, dz);
-        if (d < 2.4 && d > 0.01) {
+        if (d < 2.2 && d > 0.01) {
           const nx = dx / d;
           const nz = dz / d;
-          const overlap = 2.4 - d;
-          a.x -= nx * overlap * 0.5;
-          a.z -= nz * overlap * 0.5;
-          b.x += nx * overlap * 0.5;
-          b.z += nz * overlap * 0.5;
-          const av = a.speed;
-          a.speed = a.speed * 0.7 + b.speed * 0.15;
-          b.speed = b.speed * 0.7 + av * 0.15;
+          const push = (2.2 - d) * 0.35;
+          a.x -= nx * push;
+          a.z -= nz * push;
+          b.x += nx * push;
+          b.z += nz * push;
+          const avg = (a.speed + b.speed) * 0.5;
+          a.speed = a.speed * 0.85 + avg * 0.1;
+          b.speed = b.speed * 0.85 + avg * 0.1;
         }
       }
     }
 
-    // Lap / finish
+    // Lap progress: monotonic waypoint index along main path
+    const wpCount = this.track.waypoints.length || 1;
     for (const car of cars) {
       if (car.finished) continue;
-      const prog = worldToProgress(car.x, car.z);
-      const prev = car.lapProgress;
-      const prevCheckpoint = car.checkpoint;
+      const hint = this.prevWp.get(car.id) ?? 0;
+      const prog = worldToProgress(this.track, car.x, car.z, hint);
+      const prevIdx = hint;
+      const maxReached = this.maxWpReached.get(car.id) ?? 0;
 
-      // Forward wrap across start/finish — use checkpoint from BEFORE sector update
-      const wrappedForward = prev - prog > 0.5;
-      if (wrappedForward && prevCheckpoint >= 2) {
+      // Detect wrap: were near end, now near start, and had reached far enough
+      const nearEnd = prevIdx >= wpCount * 0.7 || maxReached >= wpCount * 0.7;
+      const nearStart = prog.wpIndex <= wpCount * 0.15;
+      const wrapped = nearEnd && nearStart && prog.wpIndex < prevIdx;
+
+      if (wrapped) {
         car.laps += 1;
         car.checkpoint = 0;
+        this.maxWpReached.set(car.id, prog.wpIndex);
         if (car.laps >= 1) {
           car.finished = true;
           car.speed = 0;
@@ -408,19 +422,19 @@ export class Room {
           this.checkRaceEnd();
         }
       } else {
-        // Advance sector checkpoints only forward
-        const sector = Math.floor(prog * 4) % 4;
-        const expected = (car.checkpoint + 1) % 4;
-        if (sector === expected) {
-          car.checkpoint = sector;
-        }
+        this.maxWpReached.set(car.id, Math.max(maxReached, prog.wpIndex));
+        car.checkpoint = Math.floor((prog.wpIndex / wpCount) * 4) % 4;
       }
-      car.lapProgress = prog;
+
+      car.lapProgress = prog.progress;
+      this.prevDist.set(car.id, prog.dist);
+      this.prevWp.set(car.id, prog.wpIndex);
     }
 
-    if (this.raceStartedAt && Date.now() - this.raceStartedAt > 90000) {
-      const unfinished = [...this.cars.values()].filter((c) => !c.finished);
-      unfinished.sort((a, b) => b.laps - a.laps || b.lapProgress - a.lapProgress);
+    if (this.raceStartedAt && Date.now() - this.raceStartedAt > 120000) {
+      const unfinished = [...this.cars.values()]
+        .filter((c) => !c.finished)
+        .sort((a, b) => b.laps - a.laps || b.lapProgress - a.lapProgress);
       for (const c of unfinished) {
         c.finished = true;
         c.speed = 0;
@@ -433,30 +447,23 @@ export class Room {
   }
 
   private checkRaceEnd(): void {
-    const active = [...this.cars.values()].filter((c) => {
-      const p = this.players.get(c.id);
-      return p?.connected;
-    });
-    if (active.every((c) => c.finished) || this.finishOrder.length >= active.length) {
+    const active = [...this.cars.values()].filter((c) => this.players.get(c.id)?.connected);
+    if (active.length > 0 && active.every((c) => c.finished)) {
       this.endRace();
     }
-    // Also end if only one left unfinished for too long — give them last place after all others done
-    // Already handled by every finished.
   }
 
   private endRace(): void {
-    this.stopTick();
-    // Assign places for unfinished
+    this.stopSim();
     const unfinished = [...this.cars.values()]
       .filter((c) => !c.finished)
-      .sort((a, b) => b.lapProgress - a.lapProgress);
+      .sort((a, b) => b.laps - a.laps || b.lapProgress - a.lapProgress);
     for (const c of unfinished) {
       c.finished = true;
       c.finishPlace = this.finishOrder.length + 1;
       this.finishOrder.push(c.id);
     }
 
-    // Award points
     this.finishOrder.forEach((id, idx) => {
       const p = this.players.get(id);
       if (p) p.score += POINTS_BY_PLACE[idx] ?? 0;
@@ -465,26 +472,8 @@ export class Room {
     this.phase = 'results';
     this.broadcast();
 
-    // After short results, check win or go to placing
     setTimeout(() => {
       if (this.phase !== 'results') return;
-      const winner = [...this.players.values()].find((p) => p.score >= this.targetScore);
-      if (winner) {
-        // Must finish 1st this race to win — check if they got 1st
-        if (this.finishOrder[0] === winner.id) {
-          this.phase = 'gameover';
-          this.winnerId = winner.id;
-          this.broadcast();
-          return;
-        }
-        // Someone reached target but didn't finish 1st — continue (or simplify: first to target wins)
-        // Spec says: "they must finish 1st next race to win (or simplify: first to target wins)"
-        // We'll use: first to reach target AND finish 1st in that race, OR if already at/above and get 1st later.
-        // Actually re-read: "then they must finish 1st next race to win"
-        // So if they hit target mid-results without being 1st this race, they need 1st next time.
-      }
-
-      // Anyone at target who got 1st this round wins
       const first = this.finishOrder[0];
       const fp = first ? this.players.get(first) : null;
       if (fp && fp.score >= this.targetScore) {
@@ -493,24 +482,55 @@ export class Room {
         this.broadcast();
         return;
       }
-
-      // Placing phase — finish order places obstacles
-      this.placingQueue = [...this.finishOrder];
-      this.phase = 'placing';
-      this.placingPlayerId = this.placingQueue[0] ?? null;
-      this.broadcast();
-
-      // Auto-skip disconnected placers
-      this.ensurePlacerConnected();
-    }, 3500);
+      this.beginPlacing();
+    }, 3000);
   }
 
-  private ensurePlacerConnected(): void {
-    while (this.placingPlayerId) {
-      const p = this.players.get(this.placingPlayerId);
-      if (p?.connected) break;
-      this.advancePlacing();
+  private beginPlacing(): void {
+    this.phase = 'placing';
+    this.placeTimeLeft = PLACE_DURATION_SEC;
+    for (const p of this.players.values()) {
+      p.hasPlaced = !p.connected;
     }
+    this.broadcast();
+    this.clearPlaceTimer();
+    this.placeTimer = setInterval(() => {
+      this.placeTimeLeft -= 1;
+      if (this.placeTimeLeft <= 0) {
+        this.placeTimeLeft = 0;
+        this.finishPlacing();
+      } else {
+        this.broadcast();
+      }
+    }, 1000);
+  }
+
+  private clearPlaceTimer(): void {
+    if (this.placeTimer) {
+      clearInterval(this.placeTimer);
+      this.placeTimer = null;
+    }
+  }
+
+  private checkPlacingDone(): void {
+    const need = [...this.players.values()].filter((p) => p.connected);
+    if (need.length > 0 && need.every((p) => p.hasPlaced)) {
+      this.finishPlacing();
+    } else {
+      this.broadcast();
+    }
+  }
+
+  private finishPlacing(): void {
+    this.clearPlaceTimer();
+    if (this.phase !== 'placing') return;
+    this.beginRace();
+  }
+
+  private markPlaced(id: string): void {
+    const p = this.players.get(id);
+    if (p) p.hasPlaced = true;
+    this.checkPlacingDone();
   }
 
   placeObstacle(
@@ -521,11 +541,12 @@ export class Room {
     yaw: number,
   ): { ok: boolean; error?: string } {
     if (this.phase !== 'placing') return { ok: false, error: 'Not placing phase' };
-    if (id !== this.placingPlayerId) return { ok: false, error: 'Not your turn' };
+    const p = this.players.get(id);
+    if (!p?.connected) return { ok: false, error: 'Not in room' };
+    if (p.hasPlaced) return { ok: false, error: 'Already placed this round' };
     if (!OBSTACLE_TYPES.includes(type)) return { ok: false, error: 'Invalid type' };
-    if (!isValidPlacement(x, z)) return { ok: false, error: 'Invalid position' };
-    // Limit total obstacles
-    if (this.obstacles.length >= 24) return { ok: false, error: 'Too many obstacles' };
+    if (!isValidObstaclePlacement(this.track, x, z)) return { ok: false, error: 'Must place on track' };
+    if (this.obstacles.length >= 40) return { ok: false, error: 'Too many obstacles' };
 
     this.obstacles.push({
       id: `ob-${++this.obstacleSeq}`,
@@ -535,25 +556,28 @@ export class Room {
       yaw,
       placedBy: id,
     });
-    this.advancePlacing();
+    this.markPlaced(id);
+    return { ok: true };
+  }
+
+  placeTrack(id: string, type: TrackPieceType, socketId: string): { ok: boolean; error?: string } {
+    if (this.phase !== 'placing') return { ok: false, error: 'Not placing phase' };
+    const p = this.players.get(id);
+    if (!p?.connected) return { ok: false, error: 'Not in room' };
+    if (p.hasPlaced) return { ok: false, error: 'Already placed this round' };
+    if (!TRACK_PIECE_TYPES.includes(type)) return { ok: false, error: 'Invalid piece' };
+
+    const result = placeTrackPiece(this.track, type, socketId, id);
+    if (!result.ok) return result;
+    this.markPlaced(id);
     return { ok: true };
   }
 
   skipPlace(id: string): void {
     if (this.phase !== 'placing') return;
-    if (id !== this.placingPlayerId) return;
-    this.advancePlacing();
-  }
-
-  private advancePlacing(): void {
-    this.placingQueue.shift();
-    this.placingPlayerId = this.placingQueue[0] ?? null;
-    if (!this.placingPlayerId) {
-      this.beginRace();
-    } else {
-      this.ensurePlacerConnected();
-      this.broadcast();
-    }
+    const p = this.players.get(id);
+    if (!p || p.hasPlaced) return;
+    this.markPlaced(id);
   }
 
   rematch(id: string): void {
@@ -562,18 +586,39 @@ export class Room {
     for (const p of this.players.values()) {
       p.score = 0;
       p.ready = false;
+      p.hasPlaced = false;
     }
     this.obstacles = [];
+    this.track = createStarterTrack();
     this.round = 0;
     this.finishOrder = [];
     this.winnerId = null;
-    this.placingQueue = [];
-    this.placingPlayerId = null;
     this.cars.clear();
     this.phase = 'lobby';
-    this.stopTick();
+    this.stopSim();
     this.clearCountdown();
+    this.clearPlaceTimer();
     this.broadcast();
+  }
+
+  getCarsUpdate(): CarsUpdate {
+    return {
+      t: Date.now(),
+      cars: [...this.cars.values()].map((c) => ({
+        id: c.id,
+        x: c.x,
+        z: c.z,
+        yaw: c.yaw,
+        speed: c.speed,
+        boost: c.boost,
+        finished: c.finished,
+        finishPlace: c.finishPlace,
+        lapProgress: c.lapProgress,
+        laps: c.laps,
+        spinning: c.spinning,
+        icy: c.icy,
+      })),
+    };
   }
 
   getState(): RoomState {
@@ -583,23 +628,26 @@ export class Room {
       players: [...this.players.values()],
       cars: [...this.cars.values()],
       obstacles: this.obstacles,
+      trackPieces: this.track.pieces,
+      trackSockets: this.track.sockets,
       targetScore: this.targetScore,
       round: this.round,
-      placingPlayerId: this.placingPlayerId,
-      placingQueue: this.placingQueue,
+      placeTimeLeft: this.placeTimeLeft,
       countdown: this.countdown,
       winnerId: this.winnerId,
       finishOrder: this.finishOrder,
       hostId: this.hostId,
+      serverTime: Date.now(),
     };
   }
 
   broadcast(): void {
-    this.emit(this.getState());
+    this.emitState(this.getState());
   }
 
   destroy(): void {
-    this.stopTick();
+    this.stopSim();
     this.clearCountdown();
+    this.clearPlaceTimer();
   }
 }

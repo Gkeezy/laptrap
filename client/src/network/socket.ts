@@ -3,8 +3,10 @@ import type {
   ClientToServerEvents,
   ServerToClientEvents,
   RoomState,
+  CarsUpdate,
   InputState,
   ObstacleType,
+  TrackPieceType,
 } from '../../../shared/types';
 
 export type GameSocket = Socket<ServerToClientEvents, ClientToServerEvents>;
@@ -56,6 +58,15 @@ export function placeObstacle(
   });
 }
 
+export function placeTrackPiece(
+  type: TrackPieceType,
+  socketId: string,
+): Promise<{ ok: boolean; error?: string }> {
+  return new Promise((resolve) => {
+    getSocket().emit('placeTrackPiece', { type, socketId }, resolve);
+  });
+}
+
 export function skipPlace(): void {
   getSocket().emit('skipPlace');
 }
@@ -70,6 +81,10 @@ export function leaveRoom(): void {
 
 export function onRoomState(cb: (state: RoomState) => void): void {
   getSocket().on('roomState', cb);
+}
+
+export function onCarsUpdate(cb: (update: CarsUpdate) => void): void {
+  getSocket().on('carsUpdate', cb);
 }
 
 export function onError(cb: (msg: string) => void): void {

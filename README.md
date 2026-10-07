@@ -1,6 +1,6 @@
 # Laptrap
 
-Browser multiplayer **trap-racing** game. Race one lap, earn points, then place obstacles (barriers, ice, boost pads, ramps, oil slicks) for the next race. First to the target score who finishes **1st** wins.
+Browser multiplayer **trap-racing** game. Race a lap on a **buildable** track, earn points, then everyone **simultaneously** places traps *or* track pieces. First to the target score who finishes **1st** wins.
 
 Original game — not affiliated with any Steam title.
 
@@ -14,57 +14,44 @@ npm start
 
 Open **http://localhost:3000**
 
-### Development (hot reload)
+### Development
 
 ```bash
 npm install
 npm run dev
 ```
 
-- Client: http://localhost:5173 (proxies Socket.io to the server)
-- Server: http://localhost:3000
-
 ## Create Room / share link
 
-1. Host opens the site → enters a name → **Create Room**.
-2. URL becomes `/?room=ABCD` (4-character code).
-3. Copy the share link from the lobby (or just send the URL).
-4. Friends open that **exact URL** to join (2–4 players).
-5. Everyone clicks **Ready**; host clicks **Start Race**.
-
-If the host disconnects, another connected player is promoted to host.
+1. Host → **Create Room** → URL becomes `/?room=ABCD`
+2. Share that link (2–**10** players)
+3. Ready up; host starts
 
 ## Controls
 
 | Action | Keyboard | Mobile |
 |--------|----------|--------|
 | Accelerate | W / ↑ | ▲ |
-| Brake / reverse | S / ↓ | ▼ |
+| Brake | S / ↓ | ▼ |
 | Steer | A/D or ←/→ | ◀ ▶ |
 | Boost | Space | BOOST |
-| Place obstacle | Click track + **Place** (or Enter) | Same |
-| Skip place | Esc / Skip | Skip |
+| Place | Click + **Place** / Enter | Same |
+| Skip place | Esc | Skip |
 
 ## Game loop
 
-1. **Lobby** — join, ready, host starts.
-2. **Countdown** → **Racing** — one lap on an oval track.
-3. **Results** — points: 1st=3, 2nd=2, 3rd=1, 4th=0.
-4. **Placing** — each finisher (in finish order) places one obstacle.
-5. Repeat until someone reaches the **target score** (default 9) **and** finishes 1st that race → **Game Over**.
+1. **Lobby** — up to 10 players
+2. **Race** — one lap on the current track graph
+3. **Results** — points by place (5/4/3/2/1/1/…)
+4. **Build (simultaneous)** — ~25s timer; each player places **one** trap **or** track piece (straight / curve L / curve R) on a green socket, or skips. When everyone is done (or timer ends) → next race
+5. Track **grows** when a new piece chain reconnects as a longer detour; shorter reconnects act as shortcuts
+6. Win at target score (default 15) **and** finish 1st that race
 
 ## Deploy
 
-### Render (recommended free tier)
+### Render
 
-1. Push this repo to GitHub.
-2. Go to [render.com](https://render.com) → **New → Web Service**.
-3. Connect the `laptrap` repo.
-4. Render detects `render.yaml`, or set manually:
-   - **Build:** `npm install && npm run build`
-   - **Start:** `node dist-server/server/index.js`
-   - **Health check:** `/api/health`
-5. Deploy → open the `*.onrender.com` URL → Create Room → share `/?room=CODE`.
+Connect `Gkeezy/laptrap` → build `npm install && npm run build` → start `node dist-server/server/index.js` → health `/api/health`
 
 ### Docker
 
@@ -73,31 +60,17 @@ docker build -t laptrap .
 docker run -p 3000:3000 -e PORT=3000 laptrap
 ```
 
-### Railway
-
-New project from GitHub repo → set start command `node dist-server/server/index.js` → deploy.
-
-### Share tonight without cloud deploy
-
-Run locally, then expose with a tunnel:
+### Share tonight
 
 ```bash
 npm start
-# other terminal:
 npx cloudflared tunnel --url http://localhost:3000
-# or: ngrok http 3000
 ```
-
-Send friends the tunnel URL + `/?room=CODE` (or create the room first and share the full link).
-
-> **Note:** GitHub Pages cannot host the Socket.io server. Use Render/Railway/Docker or a tunnel.
 
 ## Stack
 
-- **Client:** Vite, TypeScript, Three.js
-- **Server:** Node, Express, Socket.io (authoritative rooms / phases / scores / placements)
-- Single process serves the Vite build + WebSockets
+Vite + TypeScript + Three.js client · Express + Socket.io rooms · ~20 Hz car snapshots with client interpolation
 
 ## License
 
-MIT — original code and art (procedural low-poly). No third-party game assets.
+MIT

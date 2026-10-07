@@ -21,15 +21,13 @@ const io = new Server<ClientToServerEvents, ServerToClientEvents>(httpServer, {
 });
 
 const rooms = new Map<string, Room>();
-const socketRoom = new Map<string, string>(); // socket.id -> room code
+const socketRoom = new Map<string, string>();
 const existingCodes = new Set<string>();
 
-// Health / API
 app.get('/api/health', (_req, res) => {
   res.json({ ok: true, rooms: rooms.size });
 });
 
-// Serve Vite build in production
 const distPath = path.resolve(__dirname, '../../dist');
 app.use(express.static(distPath));
 app.get('*', (req, res, next) => {
@@ -39,26 +37,32 @@ app.get('*', (req, res, next) => {
   });
 });
 
-function emitRoom(code: string): void {
-  const room = rooms.get(code);
-  if (!room) return;
-  io.to(code).emit('roomState', room.getState());
+function bindRoom(code: string): Room {
+  const room = rooms.get(code)!;
+  return room;
 }
 
 io.on('connection', (socket) => {
   socket.on('createRoom', (payload, cb) => {
     try {
       const name = (payload?.name || 'Host').trim().slice(0, 16);
-      const target = Math.max(3, Math.min(21, payload?.targetScore ?? DEFAULT_TARGET_SCORE));
+      const target = Math.max(5, Math.min(50, payload?.targetScore ?? DEFAULT_TARGET_SCORE));
       const code = Room.createCode(existingCodes);
       existingCodes.add(code);
-      const room = new Room(code, socket.id, name, target, () => emitRoom(code));
+      const room = new Room(
+        code,
+        socket.id,
+        name,
+        target,
+        (state) => io.to(code).emit('roomState', state),
+        (update) => io.to(code).emit('carsUpdate', update),
+      );
       rooms.set(code, room);
       socket.join(code);
       socketRoom.set(socket.id, code);
       cb({ ok: true, code });
-      emitRoom(code);
-    } catch (e) {
+      room.broadcast();
+    } catch {
       cb({ ok: false, error: 'Failed to create room' });
     }
   });
@@ -80,7 +84,6 @@ io.on('connection', (socket) => {
       socket.join(code);
       socketRoom.set(socket.id, code);
       cb({ ok: true });
-      emitRoom(code);
     } catch {
       cb({ ok: false, error: 'Join failed' });
     }
@@ -118,8 +121,21 @@ io.on('connection', (socket) => {
       cb({ ok: false, error: 'Room gone' });
       return;
     }
-    const result = room.placeObstacle(socket.id, payload.type, payload.x, payload.z, payload.yaw);
-    cb(result);
+    cb(room.placeObstacle(socket.id, payload.type, payload.x, payload.z, payload.yaw));
+  });
+
+  socket.on('placeTrackPiece', (payload, cb) => {
+    const code = socketRoom.get(socket.id);
+    if (!code) {
+      cb({ ok: false, error: 'Not in room' });
+      return;
+    }
+    const room = rooms.get(code);
+    if (!room) {
+      cb({ ok: false, error: 'Room gone' });
+      return;
+    }
+    cb(room.placeTrack(socket.id, payload.type, payload.socketId));
   });
 
   socket.on('skipPlace', () => {
@@ -134,13 +150,8 @@ io.on('connection', (socket) => {
     rooms.get(code)?.rematch(socket.id);
   });
 
-  socket.on('leaveRoom', () => {
-    leave(socket.id);
-  });
-
-  socket.on('disconnect', () => {
-    leave(socket.id);
-  });
+  socket.on('leaveRoom', () => leave(socket.id));
+  socket.on('disconnect', () => leave(socket.id));
 });
 
 function leave(socketId: string): void {

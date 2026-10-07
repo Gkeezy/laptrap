@@ -1,6 +1,17 @@
 import './style.css';
-import type { InputState, ObstacleType, RoomState } from '../../shared/types';
-import { OBSTACLE_TYPES, OBSTACLE_LABELS } from '../../shared/types';
+import type {
+  InputState,
+  ObstacleType,
+  TrackPieceType,
+  RoomState,
+  BuildItemType,
+} from '../../shared/types';
+import {
+  OBSTACLE_TYPES,
+  OBSTACLE_LABELS,
+  TRACK_PIECE_TYPES,
+  TRACK_PIECE_LABELS,
+} from '../../shared/types';
 import * as net from './network/socket';
 import { GameScene } from './game/Scene';
 
@@ -28,7 +39,12 @@ const hudBanner = $('#hud-banner');
 const scoreboard = $('#scoreboard');
 const placeUi = $('#place-ui');
 const placeTurn = $('#place-turn');
+const placeTimer = $('#place-timer');
+const placeHint = $('#place-hint');
 const obstaclePicks = $('#obstacle-picks');
+const trackPicks = $('#track-picks');
+const tabTrap = $('#tab-trap');
+const tabTrack = $('#tab-track');
 const resultsOverlay = $('#results-overlay');
 const gameoverOverlay = $('#gameover-overlay');
 const winnerText = $('#winner-text');
@@ -38,8 +54,12 @@ const mobileControls = $('#mobile-controls');
 let scene: GameScene | null = null;
 let state: RoomState | null = null;
 let selectedObstacle: ObstacleType = 'barrier';
+let selectedTrackPiece: TrackPieceType = 'straight';
+let buildMode: 'trap' | 'track' = 'trap';
 let myReady = false;
 let inputTimer: number | null = null;
+let lastPredict = performance.now();
+let iAlreadyPlaced = false;
 
 const keys: InputState = {
   forward: false,
@@ -170,12 +190,28 @@ $('#btn-home').addEventListener('click', () => {
   location.href = '/';
 });
 
-// Obstacle pick buttons
+function setBuildMode(mode: 'trap' | 'track'): void {
+  buildMode = mode;
+  tabTrap.classList.toggle('selected', mode === 'trap');
+  tabTrack.classList.toggle('selected', mode === 'track');
+  if (mode === 'trap') {
+    show(obstaclePicks);
+    hide(trackPicks);
+    placeHint.textContent = 'Click asphalt for a trap · Enter place · Esc skip';
+  } else {
+    hide(obstaclePicks);
+    trackPicks.classList.remove('hidden');
+    placeHint.textContent = 'Click a green socket, pick a piece, Place · Esc skip';
+  }
+}
+
+tabTrap.addEventListener('click', () => setBuildMode('trap'));
+tabTrack.addEventListener('click', () => setBuildMode('track'));
+
 for (const t of OBSTACLE_TYPES) {
   const b = document.createElement('button');
   b.className = 'btn';
   b.textContent = OBSTACLE_LABELS[t];
-  b.dataset.type = t;
   b.addEventListener('click', () => {
     selectedObstacle = t;
     obstaclePicks.querySelectorAll('button').forEach((x) => x.classList.remove('selected'));
@@ -185,8 +221,40 @@ for (const t of OBSTACLE_TYPES) {
 }
 (obstaclePicks.querySelector('button') as HTMLButtonElement)?.classList.add('selected');
 
+for (const t of TRACK_PIECE_TYPES) {
+  const b = document.createElement('button');
+  b.className = 'btn';
+  b.textContent = TRACK_PIECE_LABELS[t];
+  b.addEventListener('click', () => {
+    selectedTrackPiece = t;
+    trackPicks.querySelectorAll('button').forEach((x) => x.classList.remove('selected'));
+    b.classList.add('selected');
+  });
+  trackPicks.appendChild(b);
+}
+(trackPicks.querySelector('button') as HTMLButtonElement)?.classList.add('selected');
+
 async function confirmPlace(): Promise<void> {
-  if (!scene) return;
+  if (!scene || !state) return;
+  const me = state.players.find((p) => p.id === net.myId());
+  if (me?.hasPlaced) return;
+
+  if (buildMode === 'track') {
+    if (!scene.selectedSocketId) {
+      hudBanner.textContent = 'Select a green build socket first';
+      show(hudBanner);
+      setTimeout(() => hide(hudBanner), 1500);
+      return;
+    }
+    const res = await net.placeTrackPiece(selectedTrackPiece, scene.selectedSocketId);
+    if (!res.ok) {
+      hudBanner.textContent = res.error || 'Track place failed';
+      show(hudBanner);
+      setTimeout(() => hide(hudBanner), 1500);
+    }
+    return;
+  }
+
   const { x, z, yaw } = scene.ghostPos;
   const res = await net.placeObstacle(selectedObstacle, x, z, yaw);
   if (!res.ok) {
@@ -225,8 +293,8 @@ function renderLobby(s: RoomState): void {
 
   lobbyMsg.textContent =
     s.players.filter((p) => p.connected).length < 2
-      ? 'Waiting for at least 2 players…'
-      : 'Everyone ready? Host can start.';
+      ? 'Waiting for at least 2 players… (max 10)'
+      : `Players ${s.players.length}/10 — ready up; host starts.`;
 }
 
 function renderHud(s: RoomState): void {
@@ -255,45 +323,49 @@ function renderHud(s: RoomState): void {
   if (s.phase === 'countdown' && s.countdown > 0) {
     hudCountdown.textContent = String(s.countdown);
     show(hudCountdown);
-  } else if (s.phase === 'racing' && s.countdown === 0) {
-    // brief GO
-    hide(hudCountdown);
   } else {
     hide(hudCountdown);
   }
 
-  // Results
   if (s.phase === 'results') {
     const lines = s.finishOrder.map((id, i) => {
       const p = s.players.find((x) => x.id === id);
-      const pts = [3, 2, 1, 0][i] ?? 0;
+      const pts = [5, 4, 3, 2, 1, 1, 0, 0, 0, 0][i] ?? 0;
       return `<div>${i + 1}. ${p?.name ?? '?'} <strong>+${pts}</strong></div>`;
     });
-    resultsOverlay.innerHTML = `<h2>Race Results</h2>${lines.join('')}<p class="hint">Trap time next…</p>`;
+    resultsOverlay.innerHTML = `<h2>Race Results</h2>${lines.join('')}<p class="hint">Everyone builds traps & track next…</p>`;
     show(resultsOverlay);
   } else {
     hide(resultsOverlay);
   }
 
-  // Placing
-  const isMyPlace = s.phase === 'placing' && s.placingPlayerId === net.myId();
+  // Simultaneous placing
   if (s.phase === 'placing') {
     show(placeUi);
-    const placer = s.players.find((p) => p.id === s.placingPlayerId);
-    placeTurn.textContent = isMyPlace
-      ? 'Your turn — pick an item and place it on the track!'
-      : `Waiting for ${placer?.name ?? 'player'} to place…`;
-    placeUi.querySelectorAll('button, #obstacle-picks').forEach((el) => {
-      (el as HTMLElement).style.pointerEvents = isMyPlace ? 'auto' : 'none';
-      (el as HTMLElement).style.opacity = isMyPlace ? '1' : '0.5';
-    });
-    scene?.setPlacing(isMyPlace);
+    const meP = s.players.find((p) => p.id === net.myId());
+    const placedCount = s.players.filter((p) => p.connected && p.hasPlaced).length;
+    const total = s.players.filter((p) => p.connected).length;
+    placeTimer.textContent = `${s.placeTimeLeft}s`;
+    if (meP?.hasPlaced) {
+      placeTurn.textContent = `Placed! Waiting for others (${placedCount}/${total})…`;
+      placeUi.querySelectorAll('button').forEach((el) => {
+        if (el.id === 'btn-skip-place' || el.id === 'btn-confirm-place' || el.id.startsWith('tab')) {
+          (el as HTMLButtonElement).disabled = true;
+        }
+      });
+      scene?.setPlacing(false);
+    } else {
+      placeTurn.textContent = `Build phase — place ONE trap or track piece (${placedCount}/${total} done)`;
+      placeUi.querySelectorAll('button').forEach((el) => {
+        (el as HTMLButtonElement).disabled = false;
+      });
+      scene?.setPlacing(true);
+    }
   } else {
     hide(placeUi);
     scene?.setPlacing(false);
   }
 
-  // Game over
   if (s.phase === 'gameover') {
     const w = s.players.find((p) => p.id === s.winnerId);
     winnerText.textContent = w ? `${w.name} wins!` : 'Game over';
@@ -303,15 +375,11 @@ function renderHud(s: RoomState): void {
   } else {
     hide(gameoverOverlay);
   }
-
-  if (s.phase === 'racing') {
-    hudBanner.textContent = '';
-    hide(hudBanner);
-  }
 }
 
 function onState(s: RoomState): void {
   state = s;
+  iAlreadyPlaced = !!s.players.find((p) => p.id === net.myId())?.hasPlaced;
   if (s.phase === 'lobby') {
     enterLobby();
     renderLobby(s);
@@ -320,10 +388,36 @@ function onState(s: RoomState): void {
   enterGame();
   ensureScene().sync(s);
   renderHud(s);
-  renderLobby(s); // keep share link updated if needed
+  renderLobby(s);
 }
 
 net.onRoomState(onState);
+net.onCarsUpdate((update) => {
+  if (!scene) return;
+  // Merge lightweight car fields into local state for HUD
+  if (state) {
+    for (const c of update.cars) {
+      const existing = state.cars.find((x) => x.id === c.id);
+      if (existing) Object.assign(existing, c);
+      else state.cars.push({ ...c, checkpoint: 0 });
+    }
+    if (state.phase === 'racing') {
+      const myCar = state.cars.find((c) => c.id === net.myId());
+      if (myCar?.finishPlace) hudPlace.textContent = `P${myCar.finishPlace}`;
+      else if (myCar) {
+        const sorted = [...state.cars].sort((a, b) => {
+          if (a.finished !== b.finished) return a.finished ? -1 : 1;
+          if (a.laps !== b.laps) return b.laps - a.laps;
+          return b.lapProgress - a.lapProgress;
+        });
+        const place = sorted.findIndex((c) => c.id === net.myId()) + 1;
+        hudPlace.textContent = place ? `P${place}` : '';
+      }
+    }
+  }
+  scene.applyCarsUpdate(update);
+});
+
 net.onError((msg) => {
   menuError.textContent = msg;
   hudBanner.textContent = msg;
@@ -332,19 +426,28 @@ net.onError((msg) => {
 
 function startInputLoop(): void {
   if (inputTimer) return;
+  lastPredict = performance.now();
   inputTimer = window.setInterval(() => {
-    if (!state) return;
+    if (!state || !scene) return;
+    const now = performance.now();
+    const dt = Math.min(0.05, (now - lastPredict) / 1000);
+    lastPredict = now;
+
     if (state.phase === 'racing') {
       net.sendInput({ ...keys });
+      scene.predictLocal(keys, dt);
     }
-    if (state.phase === 'placing' && state.placingPlayerId === net.myId() && scene) {
-      const speed = 0.45;
-      if (keys.left) scene.moveGhost(-speed, 0, 0);
-      if (keys.right) scene.moveGhost(speed, 0, 0);
-      if (keys.forward) scene.moveGhost(0, -speed, 0);
-      if (keys.back) scene.moveGhost(0, speed, 0);
+    if (state.phase === 'placing') {
+      const me = state.players.find((p) => p.id === net.myId());
+      if (me && !me.hasPlaced) {
+        const speed = 0.55;
+        if (keys.left) scene.moveGhost(-speed, 0);
+        if (keys.right) scene.moveGhost(speed, 0);
+        if (keys.forward) scene.moveGhost(0, -speed);
+        if (keys.back) scene.moveGhost(0, speed);
+      }
     }
-  }, 50);
+  }, 1000 / 30);
 }
 
 function bindKey(code: string, down: boolean): void {
@@ -367,9 +470,6 @@ function bindKey(code: string, down: boolean): void {
       break;
     case 'Space':
       keys.boost = down;
-      if (down) {
-        // prevent scroll
-      }
       break;
   }
 }
@@ -378,16 +478,11 @@ window.addEventListener('keydown', (e) => {
   if (e.repeat) return;
   bindKey(e.code, true);
   if (e.code === 'Space') e.preventDefault();
-  if (e.code === 'Enter' && state?.phase === 'placing' && state.placingPlayerId === net.myId()) {
-    void confirmPlace();
-  }
-  if (e.code === 'Escape' && state?.phase === 'placing' && state.placingPlayerId === net.myId()) {
-    net.skipPlace();
-  }
+  if (e.code === 'Enter' && state?.phase === 'placing') void confirmPlace();
+  if (e.code === 'Escape' && state?.phase === 'placing') net.skipPlace();
 });
 window.addEventListener('keyup', (e) => bindKey(e.code, false));
 
-// Mobile controls
 mobileControls.querySelectorAll('button').forEach((btn) => {
   const key = btn.getAttribute('data-key') as keyof InputState;
   const set = (v: boolean) => {
@@ -406,18 +501,14 @@ mobileControls.querySelectorAll('button').forEach((btn) => {
   btn.addEventListener('mouseleave', () => set(false));
 });
 
-// Auto-join from URL
 const params = new URLSearchParams(location.search);
 const roomParam = params.get('room');
 if (roomParam) {
   joinCodeInput.value = roomParam.toUpperCase();
-  // Wait a tick for socket connect
-  net.getSocket().once('connect', () => {
+  const join = () => {
     if (!nameInput.value.trim()) nameInput.value = 'Racer' + Math.floor(Math.random() * 90 + 10);
     void doJoin(roomParam);
-  });
-  if (net.getSocket().connected) {
-    if (!nameInput.value.trim()) nameInput.value = 'Racer' + Math.floor(Math.random() * 90 + 10);
-    void doJoin(roomParam);
-  }
+  };
+  net.getSocket().once('connect', join);
+  if (net.getSocket().connected) join();
 }

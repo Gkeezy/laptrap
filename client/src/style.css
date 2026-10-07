@@ -293,3 +293,10 @@ input {
 @media (pointer: coarse) {
   #mobile-controls:not(.hidden) { display: block; }
 }
+
+.timer { font-size: 1.4rem; font-weight: 800; color: var(--accent2); margin: 4px 0 8px; }
+.place-tabs { display: flex; gap: 8px; justify-content: center; margin-bottom: 8px; }
+.place-tabs .selected { outline: 2px solid var(--accent2); }
+#track-picks { display: flex; flex-wrap: wrap; gap: 8px; justify-content: center; margin: 10px 0; }
+#track-picks.hidden { display: none !important; }
+#player-list { max-height: 280px; overflow-y: auto; }

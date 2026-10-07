@@ -1,26 +1,93 @@
 import * as THREE from 'three';
-import type { CarState, Obstacle, PlayerPublic, RoomState } from '../../../shared/types';
-import { TRACK, OBSTACLE_LABELS } from '../../../shared/types';
+import type {
+  CarState,
+  CarsUpdate,
+  Obstacle,
+  PlayerPublic,
+  RoomState,
+  TrackPiece,
+  TrackSocket,
+} from '../../../shared/types';
+import { TRACK } from '../../../shared/types';
 
-const OUTER_R = TRACK.centerRadius + TRACK.trackWidth / 2;
-const INNER_R = TRACK.centerRadius - TRACK.trackWidth / 2;
+interface CarRender {
+  mesh: THREE.Group;
+  // interpolation buffer for remotes
+  from: { x: number; z: number; yaw: number; t: number };
+  to: { x: number; z: number; yaw: number; t: number };
+  // local prediction
+  localX: number;
+  localZ: number;
+  localYaw: number;
+  localSpeed: number;
+  serverX: number;
+  serverZ: number;
+  serverYaw: number;
+  serverSpeed: number;
+}
+
+function lerpAngle(a: number, b: number, t: number): number {
+  let d = b - a;
+  while (d > Math.PI) d -= Math.PI * 2;
+  while (d < -Math.PI) d += Math.PI * 2;
+  return a + d * t;
+}
+
+function samplePieceLocal(piece: TrackPiece, steps = 8): Array<{ x: number; z: number; yaw: number }> {
+  const L = TRACK.straightLen;
+  const R = TRACK.curveRadius;
+  const pts: Array<{ x: number; z: number; yaw: number }> = [];
+  const fwd = (yaw: number) => ({ x: Math.sin(yaw), z: Math.cos(yaw) });
+  const left = (yaw: number) => ({ x: -Math.cos(yaw), z: Math.sin(yaw) });
+  const right = (yaw: number) => ({ x: Math.cos(yaw), z: -Math.sin(yaw) });
+
+  if (piece.type === 'straight') {
+    const f = fwd(piece.yaw);
+    for (let i = 0; i <= steps; i++) {
+      const t = i / steps;
+      pts.push({ x: piece.x + f.x * L * t, z: piece.z + f.z * L * t, yaw: piece.yaw });
+    }
+    return pts;
+  }
+  const side = piece.type === 'curveL' ? left(piece.yaw) : right(piece.yaw);
+  const sign = piece.type === 'curveL' ? 1 : -1;
+  const cx = piece.x + side.x * R;
+  const cz = piece.z + side.z * R;
+  const relX0 = piece.x - cx;
+  const relZ0 = piece.z - cz;
+  const sweep = Math.PI / 2;
+  for (let i = 0; i <= steps; i++) {
+    const t = sign * sweep * (i / steps);
+    const cos = Math.cos(t);
+    const sin = Math.sin(t);
+    pts.push({
+      x: cx + relX0 * cos - relZ0 * sin,
+      z: cz + relX0 * sin + relZ0 * cos,
+      yaw: piece.yaw + t,
+    });
+  }
+  return pts;
+}
 
 export class GameScene {
   renderer: THREE.WebGLRenderer;
   scene: THREE.Scene;
   camera: THREE.PerspectiveCamera;
-  private carMeshes = new Map<string, THREE.Group>();
+  private cars = new Map<string, CarRender>();
   private obstacleMeshes = new Map<string, THREE.Object3D>();
-  private ghost: THREE.Mesh | null = null;
+  private pieceMeshes = new Map<string, THREE.Object3D>();
+  private socketMeshes = new Map<string, THREE.Object3D>();
   private placeMarker: THREE.Group | null = null;
+  private finishMesh: THREE.Object3D | null = null;
   private animId = 0;
   private localId = '';
   private players = new Map<string, PlayerPublic>();
   canvas: HTMLCanvasElement;
-
-  // Placement ghost position
-  ghostPos = { x: 0, z: -TRACK.centerRadius, yaw: 0 };
+  ghostPos = { x: 0, z: 0, yaw: 0 };
   placing = false;
+  selectedSocketId: string | null = null;
+  private sockets: TrackSocket[] = [];
+  private lastCarsT = 0;
 
   constructor(canvas: HTMLCanvasElement) {
     this.canvas = canvas;
@@ -30,10 +97,10 @@ export class GameScene {
     this.renderer.setClearColor(0x87b5e0);
 
     this.scene = new THREE.Scene();
-    this.scene.fog = new THREE.Fog(0x87b5e0, 60, 140);
+    this.scene.fog = new THREE.Fog(0x87b5e0, 80, 180);
 
-    this.camera = new THREE.PerspectiveCamera(55, 1, 0.1, 300);
-    this.camera.position.set(0, 28, 40);
+    this.camera = new THREE.PerspectiveCamera(55, 1, 0.1, 400);
+    this.camera.position.set(0, 35, 45);
 
     this.buildWorld();
     this.onResize();
@@ -41,86 +108,19 @@ export class GameScene {
   }
 
   private buildWorld(): void {
-    // Ground
     const ground = new THREE.Mesh(
-      new THREE.PlaneGeometry(200, 200),
+      new THREE.PlaneGeometry(400, 400),
       new THREE.MeshLambertMaterial({ color: 0x3d8c40 }),
     );
     ground.rotation.x = -Math.PI / 2;
     ground.position.y = -0.05;
     this.scene.add(ground);
 
-    // Track ring (asphalt)
-    const trackShape = new THREE.Shape();
-    trackShape.absarc(0, 0, OUTER_R, 0, Math.PI * 2, false);
-    const hole = new THREE.Path();
-    hole.absarc(0, 0, INNER_R, 0, Math.PI * 2, true);
-    trackShape.holes.push(hole);
-    const trackGeo = new THREE.ExtrudeGeometry(trackShape, { depth: 0.15, bevelEnabled: false });
-    trackGeo.rotateX(-Math.PI / 2);
-    const track = new THREE.Mesh(trackGeo, new THREE.MeshLambertMaterial({ color: 0x2a2e35 }));
-    this.scene.add(track);
-
-    // Lane dashes (simple rings)
-    const mid = new THREE.Mesh(
-      new THREE.RingGeometry(TRACK.centerRadius - 0.15, TRACK.centerRadius + 0.15, 96),
-      new THREE.MeshBasicMaterial({ color: 0xf5d76e, side: THREE.DoubleSide }),
-    );
-    mid.rotation.x = -Math.PI / 2;
-    mid.position.y = 0.16;
-    this.scene.add(mid);
-
-    // Walls
-    this.addWallRing(OUTER_R + 0.15, 0x8e9aab);
-    this.addWallRing(INNER_R - 0.15, 0x8e9aab);
-
-    // Start/finish checkered strip
-    const finish = new THREE.Mesh(
-      new THREE.BoxGeometry(TRACK.trackWidth, 0.08, 1.2),
-      new THREE.MeshBasicMaterial({ color: 0xffffff }),
-    );
-    finish.position.set(0, 0.2, -TRACK.centerRadius);
-    this.scene.add(finish);
-
-    // Start banners poles
-    for (const side of [-TRACK.trackWidth / 2 - 0.5, TRACK.trackWidth / 2 + 0.5]) {
-      const pole = new THREE.Mesh(
-        new THREE.CylinderGeometry(0.2, 0.2, 4, 8),
-        new THREE.MeshLambertMaterial({ color: 0xeeeeee }),
-      );
-      pole.position.set(side, 2, -TRACK.centerRadius);
-      this.scene.add(pole);
-    }
-    const banner = new THREE.Mesh(
-      new THREE.BoxGeometry(TRACK.trackWidth + 1, 0.8, 0.15),
-      new THREE.MeshLambertMaterial({ color: 0xff5a36 }),
-    );
-    banner.position.set(0, 3.6, -TRACK.centerRadius);
-    this.scene.add(banner);
-
-    // Lights
     const amb = new THREE.AmbientLight(0xffffff, 0.55);
     this.scene.add(amb);
     const sun = new THREE.DirectionalLight(0xfff2d6, 1.05);
-    sun.position.set(30, 50, 20);
+    sun.position.set(40, 60, 20);
     this.scene.add(sun);
-
-    // Infield decoration
-    const infield = new THREE.Mesh(
-      new THREE.CircleGeometry(INNER_R - 1, 48),
-      new THREE.MeshLambertMaterial({ color: 0x4aa34f }),
-    );
-    infield.rotation.x = -Math.PI / 2;
-    infield.position.y = 0.02;
-    this.scene.add(infield);
-  }
-
-  private addWallRing(radius: number, color: number): void {
-    const geo = new THREE.TorusGeometry(radius, 0.35, 6, 96);
-    geo.rotateX(Math.PI / 2);
-    const mesh = new THREE.Mesh(geo, new THREE.MeshLambertMaterial({ color }));
-    mesh.position.y = 0.5;
-    this.scene.add(mesh);
   }
 
   setLocalId(id: string): void {
@@ -205,33 +205,166 @@ export class GameScene {
     }
   }
 
+  private makePieceMesh(piece: TrackPiece): THREE.Object3D {
+    const g = new THREE.Group();
+    const samples = samplePieceLocal(piece, 10);
+    const halfW = TRACK.width / 2;
+    const mat = new THREE.MeshLambertMaterial({
+      color: piece.onMainPath ? 0x2a2e35 : 0x3a4555,
+    });
+    const wallMat = new THREE.MeshLambertMaterial({ color: 0x8e9aab });
+
+    for (let i = 0; i < samples.length - 1; i++) {
+      const a = samples[i];
+      const b = samples[i + 1];
+      const dx = b.x - a.x;
+      const dz = b.z - a.z;
+      const len = Math.hypot(dx, dz) || 0.01;
+      const yaw = Math.atan2(dx, dz);
+      const seg = new THREE.Mesh(new THREE.BoxGeometry(TRACK.width, 0.16, len + 0.05), mat);
+      seg.position.set((a.x + b.x) / 2, 0.08, (a.z + b.z) / 2);
+      seg.rotation.y = yaw;
+      g.add(seg);
+
+      // side walls
+      const left = { x: -Math.cos(yaw), z: Math.sin(yaw) };
+      for (const sign of [-1, 1]) {
+        const wall = new THREE.Mesh(new THREE.BoxGeometry(0.35, 0.9, len + 0.05), wallMat);
+        wall.position.set(
+          (a.x + b.x) / 2 + left.x * halfW * sign,
+          0.45,
+          (a.z + b.z) / 2 + left.z * halfW * sign,
+        );
+        wall.rotation.y = yaw;
+        g.add(wall);
+      }
+
+      // center line dash
+      if (i % 2 === 0) {
+        const dash = new THREE.Mesh(
+          new THREE.BoxGeometry(0.25, 0.05, Math.min(1.2, len * 0.6)),
+          new THREE.MeshBasicMaterial({ color: 0xf5d76e }),
+        );
+        dash.position.set((a.x + b.x) / 2, 0.18, (a.z + b.z) / 2);
+        dash.rotation.y = yaw;
+        g.add(dash);
+      }
+    }
+    return g;
+  }
+
+  syncTrack(pieces: TrackPiece[], sockets: TrackSocket[]): void {
+    this.sockets = sockets;
+    const seen = new Set<string>();
+    for (const piece of pieces) {
+      seen.add(piece.id);
+      if (!this.pieceMeshes.has(piece.id)) {
+        const mesh = this.makePieceMesh(piece);
+        this.pieceMeshes.set(piece.id, mesh);
+        this.scene.add(mesh);
+      }
+    }
+    for (const [id, mesh] of this.pieceMeshes) {
+      if (!seen.has(id)) {
+        this.scene.remove(mesh);
+        this.pieceMeshes.delete(id);
+      }
+    }
+
+    // Rebuild piece meshes if main-path flag may change colors — recreate when count changes is enough;
+    // force refresh when piece set identity changes
+    // Sockets
+    const sockSeen = new Set<string>();
+    for (const s of sockets) {
+      sockSeen.add(s.id);
+      let mesh = this.socketMeshes.get(s.id);
+      if (!mesh) {
+        mesh = new THREE.Mesh(
+          new THREE.CylinderGeometry(1.4, 1.4, 0.2, 16),
+          new THREE.MeshBasicMaterial({ color: 0x3ecf8e, transparent: true, opacity: 0.65 }),
+        );
+        mesh.position.y = 0.3;
+        this.socketMeshes.set(s.id, mesh);
+        this.scene.add(mesh);
+      }
+      mesh.position.x = s.x;
+      mesh.position.z = s.z;
+      mesh.visible = this.placing;
+      if (this.selectedSocketId === s.id) {
+        (mesh as THREE.Mesh).material = new THREE.MeshBasicMaterial({
+          color: 0xff5a36,
+          transparent: true,
+          opacity: 0.9,
+        });
+      } else {
+        (mesh as THREE.Mesh).material = new THREE.MeshBasicMaterial({
+          color: 0x3ecf8e,
+          transparent: true,
+          opacity: 0.65,
+        });
+      }
+    }
+    for (const [id, mesh] of this.socketMeshes) {
+      if (!sockSeen.has(id)) {
+        this.scene.remove(mesh);
+        this.socketMeshes.delete(id);
+      }
+    }
+
+    // Finish line at first piece entry-ish
+    if (pieces.length && !this.finishMesh) {
+      const start = pieces.find((p) => p.onMainPath) || pieces[0];
+      const fin = new THREE.Mesh(
+        new THREE.BoxGeometry(TRACK.width, 0.08, 1.0),
+        new THREE.MeshBasicMaterial({ color: 0xffffff }),
+      );
+      fin.position.set(start.x, 0.2, start.z);
+      fin.rotation.y = start.yaw;
+      this.finishMesh = fin;
+      this.scene.add(fin);
+    }
+  }
+
+  /** Full state sync (phase changes, lobby, placing) */
   sync(state: RoomState): void {
     this.players.clear();
     for (const p of state.players) this.players.set(p.id, p);
 
-    // Cars
+    this.syncTrack(state.trackPieces, state.trackSockets);
+
+    const now = performance.now();
     const seen = new Set<string>();
     for (const car of state.cars) {
       seen.add(car.id);
-      let mesh = this.carMeshes.get(car.id);
-      if (!mesh) {
-        const color = this.players.get(car.id)?.color || '#ffffff';
-        mesh = this.makeCar(color);
-        this.carMeshes.set(car.id, mesh);
-        this.scene.add(mesh);
+      this.ensureCar(car, now);
+      const cr = this.cars.get(car.id)!;
+      cr.serverX = car.x;
+      cr.serverZ = car.z;
+      cr.serverYaw = car.yaw;
+      cr.serverSpeed = car.speed;
+      if (car.id === this.localId) {
+        // Soft snap on phase start
+        if (state.phase === 'countdown' || state.phase === 'racing') {
+          const dx = car.x - cr.localX;
+          const dz = car.z - cr.localZ;
+          if (Math.hypot(dx, dz) > 8 || state.phase === 'countdown') {
+            cr.localX = car.x;
+            cr.localZ = car.z;
+            cr.localYaw = car.yaw;
+            cr.localSpeed = car.speed;
+          }
+        }
+      } else {
+        cr.from = { ...cr.to };
+        cr.to = { x: car.x, z: car.z, yaw: car.yaw, t: now };
       }
-      mesh.position.set(car.x, 0, car.z);
-      mesh.rotation.y = car.yaw;
-      mesh.visible = true;
+      cr.mesh.visible = true;
     }
-    for (const [id, mesh] of this.carMeshes) {
-      if (!seen.has(id)) mesh.visible = false;
+    for (const [id, cr] of this.cars) {
+      if (!seen.has(id)) cr.mesh.visible = false;
     }
 
-    // Obstacles
-    const obSeen = new Set<string>();
     for (const ob of state.obstacles) {
-      obSeen.add(ob.id);
       let mesh = this.obstacleMeshes.get(ob.id);
       if (!mesh) {
         mesh = this.makeObstacle(ob.type);
@@ -242,8 +375,9 @@ export class GameScene {
       mesh.position.z = ob.z;
       mesh.rotation.y = ob.yaw;
     }
+    const obIds = new Set(state.obstacles.map((o) => o.id));
     for (const [id, mesh] of this.obstacleMeshes) {
-      if (!obSeen.has(id)) {
+      if (!obIds.has(id)) {
         this.scene.remove(mesh);
         this.obstacleMeshes.delete(id);
       }
@@ -252,8 +386,83 @@ export class GameScene {
     this.updateGhostVisibility();
   }
 
+  /** High-rate car snapshots during race */
+  applyCarsUpdate(update: CarsUpdate): void {
+    const now = performance.now();
+    this.lastCarsT = update.t;
+    for (const car of update.cars) {
+      const cr = this.cars.get(car.id);
+      if (!cr) continue;
+      cr.serverX = car.x;
+      cr.serverZ = car.z;
+      cr.serverYaw = car.yaw;
+      cr.serverSpeed = car.speed;
+      if (car.id === this.localId) {
+        // Soft-correct local prediction toward server (no hard snap)
+        const dx = car.x - cr.localX;
+        const dz = car.z - cr.localZ;
+        const err = Math.hypot(dx, dz);
+        if (err > 12) {
+          cr.localX = car.x;
+          cr.localZ = car.z;
+          cr.localYaw = car.yaw;
+          cr.localSpeed = car.speed;
+        } else {
+          const k = err > 4 ? 0.25 : 0.12;
+          cr.localX += dx * k;
+          cr.localZ += dz * k;
+          cr.localYaw = lerpAngle(cr.localYaw, car.yaw, k);
+          cr.localSpeed = cr.localSpeed * (1 - k) + car.speed * k;
+        }
+      } else {
+        cr.from = { ...cr.to };
+        cr.to = { x: car.x, z: car.z, yaw: car.yaw, t: now };
+      }
+    }
+  }
+
+  private ensureCar(car: CarState, now: number): void {
+    if (this.cars.has(car.id)) return;
+    const color = this.players.get(car.id)?.color || '#ffffff';
+    const mesh = this.makeCar(color);
+    this.scene.add(mesh);
+    this.cars.set(car.id, {
+      mesh,
+      from: { x: car.x, z: car.z, yaw: car.yaw, t: now },
+      to: { x: car.x, z: car.z, yaw: car.yaw, t: now },
+      localX: car.x,
+      localZ: car.z,
+      localYaw: car.yaw,
+      localSpeed: car.speed,
+      serverX: car.x,
+      serverZ: car.z,
+      serverYaw: car.yaw,
+      serverSpeed: car.speed,
+    });
+  }
+
+  /** Client-side local prediction step */
+  predictLocal(input: { forward: boolean; back: boolean; left: boolean; right: boolean; boost: boolean }, dt: number): void {
+    const cr = this.cars.get(this.localId);
+    if (!cr) return;
+    if (cr.localSpeed === undefined) return;
+
+    const turnRate = 2.6 + Math.min(Math.abs(cr.localSpeed) * 0.05, 1.2);
+    if (input.left) cr.localYaw += turnRate * dt;
+    if (input.right) cr.localYaw -= turnRate * dt;
+    if (input.forward) cr.localSpeed += 30 * dt;
+    if (input.back) cr.localSpeed -= 42 * dt;
+    if (input.boost && cr.localSpeed > 4) cr.localSpeed += 26 * dt;
+    cr.localSpeed *= Math.max(0, 1 - 1.0 * dt);
+    if (!input.forward && !input.back) cr.localSpeed *= Math.max(0, 1 - 2.8 * dt);
+    cr.localSpeed = Math.max(-12, Math.min(64, cr.localSpeed));
+    cr.localX += Math.sin(cr.localYaw) * cr.localSpeed * dt;
+    cr.localZ += Math.cos(cr.localYaw) * cr.localSpeed * dt;
+  }
+
   setPlacing(active: boolean): void {
     this.placing = active;
+    for (const mesh of this.socketMeshes.values()) mesh.visible = active;
     this.updateGhostVisibility();
   }
 
@@ -262,44 +471,57 @@ export class GameScene {
       if (!this.placeMarker) {
         const g = new THREE.Group();
         const ring = new THREE.Mesh(
-          new THREE.RingGeometry(1.5, 2.0, 24),
-          new THREE.MeshBasicMaterial({ color: 0x3ecf8e, side: THREE.DoubleSide, transparent: true, opacity: 0.8 }),
+          new THREE.RingGeometry(1.2, 1.8, 24),
+          new THREE.MeshBasicMaterial({ color: 0xff5a36, side: THREE.DoubleSide, transparent: true, opacity: 0.85 }),
         );
         ring.rotation.x = -Math.PI / 2;
-        ring.position.y = 0.25;
+        ring.position.y = 0.35;
         g.add(ring);
         this.placeMarker = g;
         this.scene.add(g);
       }
       this.placeMarker.visible = true;
       this.placeMarker.position.set(this.ghostPos.x, 0, this.ghostPos.z);
-      this.placeMarker.rotation.y = this.ghostPos.yaw;
     } else if (this.placeMarker) {
       this.placeMarker.visible = false;
     }
   }
 
-  moveGhost(dx: number, dz: number, dyaw: number): void {
+  moveGhost(dx: number, dz: number): void {
     this.ghostPos.x += dx;
     this.ghostPos.z += dz;
-    this.ghostPos.yaw += dyaw;
-    // Soft clamp to track annulus
-    const d = Math.hypot(this.ghostPos.x, this.ghostPos.z) || 0.001;
-    const minR = INNER_R + 1.5;
-    const maxR = OUTER_R - 1.5;
-    if (d < minR) {
-      this.ghostPos.x = (this.ghostPos.x / d) * minR;
-      this.ghostPos.z = (this.ghostPos.z / d) * minR;
-    } else if (d > maxR) {
-      this.ghostPos.x = (this.ghostPos.x / d) * maxR;
-      this.ghostPos.z = (this.ghostPos.z / d) * maxR;
-    }
     this.updateGhostVisibility();
   }
 
   setGhostFromClick(x: number, z: number): void {
     this.ghostPos.x = x;
     this.ghostPos.z = z;
+    // Select nearest socket if close
+    let best: TrackSocket | null = null;
+    let bestD = 6;
+    for (const s of this.sockets) {
+      const d = Math.hypot(s.x - x, s.z - z);
+      if (d < bestD) {
+        bestD = d;
+        best = s;
+      }
+    }
+    if (best) {
+      this.selectedSocketId = best.id;
+      this.ghostPos.x = best.x;
+      this.ghostPos.z = best.z;
+      this.ghostPos.yaw = best.yaw;
+    } else {
+      this.selectedSocketId = null;
+    }
+    for (const [id, mesh] of this.socketMeshes) {
+      const selected = id === this.selectedSocketId;
+      (mesh as THREE.Mesh).material = new THREE.MeshBasicMaterial({
+        color: selected ? 0xff5a36 : 0x3ecf8e,
+        transparent: true,
+        opacity: selected ? 0.9 : 0.65,
+      });
+    }
     this.updateGhostVisibility();
   }
 
@@ -320,8 +542,13 @@ export class GameScene {
   }
 
   start(): void {
+    let last = performance.now();
     const loop = () => {
       this.animId = requestAnimationFrame(loop);
+      const now = performance.now();
+      const dt = Math.min(0.05, (now - last) / 1000);
+      last = now;
+      this.renderCars(now);
       this.updateCamera();
       this.renderer.render(this.scene, this.camera);
     };
@@ -332,28 +559,53 @@ export class GameScene {
     cancelAnimationFrame(this.animId);
   }
 
+  private renderCars(now: number): void {
+    for (const [id, cr] of this.cars) {
+      if (!cr.mesh.visible) continue;
+      if (id === this.localId) {
+        cr.mesh.position.set(cr.localX, 0, cr.localZ);
+        cr.mesh.rotation.y = cr.localYaw;
+      } else {
+        const span = Math.max(16, cr.to.t - cr.from.t);
+        const t = Math.min(1, (now - cr.to.t + span) / span);
+        // interpolate from→to, then lightly extrapolate if past
+        const alpha = Math.min(1.15, Math.max(0, (now - cr.from.t) / span));
+        const a = Math.min(alpha, 1);
+        const x = cr.from.x + (cr.to.x - cr.from.x) * a;
+        const z = cr.from.z + (cr.to.z - cr.from.z) * a;
+        const yaw = lerpAngle(cr.from.yaw, cr.to.yaw, a);
+        // if slightly past, extrapolate along last delta
+        if (alpha > 1) {
+          const ex = alpha - 1;
+          cr.mesh.position.set(x + (cr.to.x - cr.from.x) * ex * 0.3, 0, z + (cr.to.z - cr.from.z) * ex * 0.3);
+        } else {
+          cr.mesh.position.set(x, 0, z);
+        }
+        cr.mesh.rotation.y = yaw;
+      }
+    }
+  }
+
   private updateCamera(): void {
     if (this.placing) {
-      // Top-down-ish for placement
       const t = this.ghostPos;
-      this.camera.position.lerp(new THREE.Vector3(t.x, 45, t.z + 8), 0.08);
+      this.camera.position.lerp(new THREE.Vector3(t.x, 55, t.z + 10), 0.08);
       this.camera.lookAt(t.x, 0, t.z);
       return;
     }
-    const car = this.carMeshes.get(this.localId);
-    if (car && car.visible) {
+    const cr = this.cars.get(this.localId);
+    if (cr && cr.mesh.visible) {
+      const yaw = cr.localYaw;
       const behind = new THREE.Vector3(
-        car.position.x - Math.sin(car.rotation.y) * 12,
-        7,
-        car.position.z - Math.cos(car.rotation.y) * 12,
+        cr.localX - Math.sin(yaw) * 14,
+        8,
+        cr.localZ - Math.cos(yaw) * 14,
       );
-      this.camera.position.lerp(behind, 0.12);
-      this.camera.lookAt(car.position.x, 1, car.position.z);
+      this.camera.position.lerp(behind, 0.1);
+      this.camera.lookAt(cr.localX, 1, cr.localZ);
     } else {
-      this.camera.position.lerp(new THREE.Vector3(0, 40, 50), 0.05);
+      this.camera.position.lerp(new THREE.Vector3(0, 50, 55), 0.05);
       this.camera.lookAt(0, 0, 0);
     }
   }
 }
-
-export { OBSTACLE_LABELS };
