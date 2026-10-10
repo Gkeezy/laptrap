@@ -1,6 +1,6 @@
 # Laptrap
 
-Browser multiplayer **fruit foot-race** with traps. You play one of 10 little low-poly **running fruits** (apple, banana, orange, strawberry, watermelon slice, pineapple, grapes, lemon, cherry, pear). Run from START to FINISH on a **buildable** track, earn points, then everyone **simultaneously** places a trap (**anywhere on the map**) *or* a track piece. First to the target score who finishes **1st** wins.
+Browser multiplayer **fruit foot-race** with traps. You play one of 10 little low-poly **running fruits** (apple, banana, orange, strawberry, watermelon slice, pineapple, grapes, lemon, cherry, pear). Run from START to FINISH on a **buildable** track, earn points, then everyone grabs one item from a **shared pick pool** (first click wins) and places it **at the same time**: traps go **anywhere on the map**, track pieces snap on. First to the target score who finishes **1st** wins.
 
 Original game — not affiliated with any Steam title.
 
@@ -31,12 +31,12 @@ npm run dev
 
 Each player gets a unique fruit (assigned on join, shown in the lobby and scoreboard). Fruits are built from Three.js primitives (original art) and have little legs with a speed-scaled **run cycle**, body **bounce + squash/stretch**, an **idle** breathing pose, and a **jump** pose (legs tucked, arms up).
 
-Movement is tuned like running: quick acceleration, quick stop, snappy turning even at low speed. **Space = jump** (replaces the old car boost). A hop clears barriers and spikes, but you still have to land on the asphalt.
+Movement is tuned like running: quick acceleration, quick stop, and **eased steering** (input ramps in over about 0.25s; turn rate is 1.9 rad/s standing, down to 1.3 rad/s at top speed). **Space = jump** (replaces the old car boost). A hop clears barriers and spikes, and a jump over the edge that lands back on the asphalt is fine.
 
 ## Track & hazards
 
 - Starter is a **straight line**; **START** is fixed, **FINISH** follows the farthest tip.
-- **No side rails**: run off the asphalt and you’re out for the round (DNF).
+- **No side rails**: run off the asphalt and you actually **fall**. Once you drop **5 units below the track** you’re out for the round (DNF). Air time from jumps and ramps over the track never counts as falling.
 - Place **utility** traps (barrier, ice, speed pad, ramp, oil) or **death** traps (bomb, spikes, mine).
 - **Traps go anywhere**: the ghost follows your mouse, the ring turns green when the spot is valid, left-click places, R rotates. The server rejects spots outside the map (±200), inside the START/spawn zone, or within 3 units of another trap.
 - **Ramps** launch you into the air.
@@ -56,10 +56,11 @@ Movement is tuned like running: quick acceleration, quick stop, snappy turning e
 
 1. **Lobby** — up to 10 players
 2. **Run**: race on foot from the fixed **START** line to the **FINISH** line (finish sits at the farthest tip of the main path and moves when you extend the track)
-3. **Results** — points by place
-4. **Build (simultaneous, ~25s)** — click to **select** one trap *or* track piece, then **click the map** to place it (exactly one item per player per round). Skip if you want.
-5. Starter map is a **straight line** of 4 pieces with open sockets at both ends. Add curves to grow toward a loop; when a loop closes, start/finish share a gate.
-6. Win at target score **and** finish 1st that race
+3. **Results**: points by place. A race ends when everyone has finished or is out; once the first runner finishes, the rest have **15s** before they DNF (hard cap 120s).
+4. **Pick (~15s)**: the server deals a random **shared pool of (players + 2)** items, a mix of traps and track pieces, always with at least 2 track pieces so the course keeps growing. Everyone sees the same pool; **click one to claim it**. First click wins (server-authoritative), and claimed cards show the taker's fruit and name. Anyone who hasn't picked when the timer ends gets a random leftover.
+5. **Place (simultaneous, ~25s, ends early when all have placed)**: everyone places their claimed item on a fixed overview of the course: traps anywhere (R rotates), track pieces on a green socket. Esc skips.
+6. Starter map is a **straight line** of 4 pieces with open sockets at both ends. Add curves to grow toward a loop; when a loop closes, start/finish share a gate.
+7. Win at target score **and** finish 1st that race
 
 ## Deploy
 

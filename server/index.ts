@@ -113,7 +113,12 @@ io.on('connection', (socket) => {
   socket.on('pose', (pose) => {
     const code = socketRoom.get(socket.id);
     if (!code) return;
-    rooms.get(code)?.applyPose(socket.id, pose);
+    try {
+      if (!pose || typeof pose !== 'object') return;
+      rooms.get(code)?.applyPose(socket.id, pose);
+    } catch (err) {
+      console.error('pose handler failed', err);
+    }
   });
 
   socket.on('placeObstacle', (payload, cb) => {
@@ -142,6 +147,22 @@ io.on('connection', (socket) => {
       return;
     }
     cb(room.placeTrack(socket.id, payload.type, payload.socketId));
+  });
+
+  socket.on('claimPick', (payload, cb) => {
+    const reply = typeof cb === 'function' ? cb : () => {};
+    const code = socketRoom.get(socket.id);
+    const room = code ? rooms.get(code) : undefined;
+    if (!room) {
+      reply({ ok: false, error: 'Not in room' });
+      return;
+    }
+    try {
+      reply(room.claimPick(socket.id, String(payload?.itemId ?? '')));
+    } catch (err) {
+      console.error('claimPick failed', err);
+      reply({ ok: false, error: 'Server error' });
+    }
   });
 
   socket.on('skipPlace', () => {
@@ -173,6 +194,10 @@ function leave(socketId: string): void {
     existingCodes.delete(code);
   }
 }
+
+// Never let one bad event take the whole server (and every room) down
+process.on('uncaughtException', (err) => console.error('uncaughtException', err));
+process.on('unhandledRejection', (err) => console.error('unhandledRejection', err));
 
 httpServer.listen(PORT, () => {
   console.log(`Laptrap server listening on http://localhost:${PORT}`);

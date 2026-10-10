@@ -1,11 +1,9 @@
 import './style.css';
-import type { InputState, ObstacleType, TrackPieceType, RoomState } from '../../shared/types';
+import type { InputState, ObstacleType, TrackPieceType, RoomState, PickKind } from '../../shared/types';
 import {
-  OBSTACLE_TYPES,
   OBSTACLE_LABELS,
   OBSTACLE_ICONS,
   DEATH_TRAPS,
-  TRACK_PIECE_TYPES,
   TRACK_PIECE_LABELS,
   TRACK_PIECE_ICONS,
   FRUITS,
@@ -41,10 +39,12 @@ const placeUi = $('#place-ui');
 const placeTurn = $('#place-turn');
 const placeTimer = $('#place-timer');
 const placeHint = $('#place-hint');
-const obstaclePicks = $('#obstacle-picks');
-const trackPicks = $('#track-picks');
-const tabTrap = $('#tab-trap');
-const tabTrack = $('#tab-track');
+const placeItem = $('#place-item');
+const pickUi = $('#pick-ui');
+const pickGrid = $('#pick-grid');
+const pickTimer = $('#pick-timer');
+const pickStatus = $('#pick-status');
+const hudGrace = $('#hud-grace');
 const resultsOverlay = $('#results-overlay');
 const gameoverOverlay = $('#gameover-overlay');
 const winnerText = $('#winner-text');
@@ -53,6 +53,10 @@ const mobileControls = $('#mobile-controls');
 
 let scene: GameScene | null = null;
 let state: RoomState | null = null;
+// Read-only debug/test handle (used by automated browser tests)
+let graceReceivedAt = 0;
+const debugHandle = { frames: 0, errors: [] as string[], get phase() { return state?.phase; }, get state() { return state; }, get scene() { return scene; } };
+(window as unknown as { __laptrap: typeof debugHandle }).__laptrap = debugHandle;
 let selectedObstacle: ObstacleType = 'barrier';
 let selectedTrackPiece: TrackPieceType = 'straight';
 let buildMode: 'trap' | 'track' = 'trap';
@@ -183,64 +187,78 @@ $('#btn-skip-place').addEventListener('click', () => net.skipPlace());
 btnRematch.addEventListener('click', () => net.rematch());
 $('#btn-home').addEventListener('click', () => { net.leaveRoom(); location.href = '/'; });
 
-function setBuildMode(mode: 'trap' | 'track'): void {
-  buildMode = mode;
-  tabTrap.classList.toggle('selected', mode === 'trap');
-  tabTrack.classList.toggle('selected', mode === 'track');
-  if (mode === 'trap') {
-    show(obstaclePicks);
-    hide(trackPicks);
-    scene?.setGhostType(selectedObstacle);
-    placeHint.textContent = 'Select a trap, then left-click ANYWHERE on the map (R = rotate, one per round)';
-  } else {
-    hide(obstaclePicks);
-    trackPicks.classList.remove('hidden');
-    scene?.setGhostType(null);
-    placeHint.textContent = 'Select a piece, then left-click a green socket (one per round)';
+/** Log an error without letting it break the game loop or socket handlers. */
+function reportError(where: string, err: unknown): void {
+  const msg = `${where}: ${err instanceof Error ? err.message : String(err)}`;
+  debugHandle.errors.push(msg);
+  if (debugHandle.errors.length > 50) debugHandle.errors.shift();
+  console.error('[laptrap]', where, err);
+}
+
+function itemIcon(kind: PickKind, type: string): string {
+  return kind === 'track' ? TRACK_PIECE_ICONS[type as TrackPieceType] : OBSTACLE_ICONS[type as ObstacleType];
+}
+function itemLabel(kind: PickKind, type: string): string {
+  return kind === 'track' ? TRACK_PIECE_LABELS[type as TrackPieceType] : OBSTACLE_LABELS[type as ObstacleType];
+}
+
+/** Pick cards are created once per pool and updated in place, so clicks never hit a detached button. */
+let pickPoolKey = '';
+const pickCards = new Map<string, HTMLButtonElement>();
+
+function renderPick(s: RoomState): void {
+  if (s.phase !== 'picking') {
+    hide(pickUi);
+    return;
   }
+  show(pickUi);
+  const me = s.players.find((p) => p.id === net.myId());
+  pickTimer.textContent = `${s.pickTimeLeft}s`;
+  const key = s.pickPool.map((i) => i.id).join(',');
+  if (key !== pickPoolKey) {
+    pickPoolKey = key;
+    pickCards.clear();
+    pickGrid.innerHTML = '';
+    for (const item of s.pickPool) {
+      const b = document.createElement('button');
+      b.type = 'button';
+      const death = item.kind === 'trap' && DEATH_TRAPS.includes(item.type as ObstacleType);
+      b.dataset.base = `pick-card ${item.kind}${death ? ' death' : ''}`;
+      b.className = b.dataset.base;
+      b.innerHTML = `<span class="ico">${itemIcon(item.kind, item.type)}</span><span>${itemLabel(item.kind, item.type)}</span>` +
+        `<span class="kind">${item.kind === 'track' ? 'track piece' : death ? 'death trap' : 'trap'}</span><span class="who"></span>`;
+      // pointerdown = fastest possible claim; server decides who was first
+      b.addEventListener('pointerdown', async (ev) => {
+        ev.preventDefault();
+        ev.stopPropagation();
+        if (b.disabled) {
+          const cur = state?.pickPool.find((i) => i.id === item.id);
+          const who = cur?.claimedBy ? state?.players.find((p) => p.id === cur.claimedBy)?.name : null;
+          if (who && cur?.claimedBy !== net.myId()) flash(`Too slow — ${who} took it`);
+          return;
+        }
+        const res = await net.claimPick(item.id);
+        if (!res.ok) flash(res.error || 'Could not pick');
+      });
+      pickCards.set(item.id, b);
+      pickGrid.appendChild(b);
+    }
+  }
+  for (const item of s.pickPool) {
+    const b = pickCards.get(item.id);
+    if (!b) continue;
+    const owner = item.claimedBy ? s.players.find((p) => p.id === item.claimedBy) : null;
+    b.className = `${b.dataset.base}${owner ? ' claimed' : ''}${owner && owner.id === net.myId() ? ' mine' : ''}`;
+    b.disabled = !!owner || !!me?.claim;
+    const who = b.querySelector('.who');
+    if (who) who.textContent = owner ? `${fruitOf(owner.fruit)?.emoji ?? ''} ${owner.name}` : '';
+  }
+  const picked = s.players.filter((p) => p.connected && p.claim).length;
+  const total = s.players.filter((p) => p.connected).length;
+  pickStatus.textContent = me?.claim
+    ? `You got ${itemIcon(me.claim.kind, me.claim.type)} ${itemLabel(me.claim.kind, me.claim.type)} — waiting (${picked}/${total})…`
+    : `Click one item. No pick when the timer ends = random leftover. (${picked}/${total})`;
 }
-tabTrap.addEventListener('click', () => setBuildMode('trap'));
-tabTrack.addEventListener('click', () => setBuildMode('track'));
-
-function makeIconBtn(
-  icon: string,
-  label: string,
-  death: boolean,
-  onPick: () => void,
-): HTMLButtonElement {
-  const b = document.createElement('button');
-  b.type = 'button';
-  b.className = 'icon-btn' + (death ? ' death' : '');
-  b.innerHTML = `<span class="ico">${icon}</span><span>${label}</span>`;
-  b.addEventListener('click', (ev) => {
-    ev.stopPropagation();
-    onPick();
-    b.parentElement?.querySelectorAll('.icon-btn').forEach((x) => x.classList.remove('selected'));
-    b.classList.add('selected');
-    itemSelected = true;
-  });
-  return b;
-}
-
-for (const t of OBSTACLE_TYPES) {
-  const b = makeIconBtn(OBSTACLE_ICONS[t], OBSTACLE_LABELS[t], DEATH_TRAPS.includes(t), () => {
-    selectedObstacle = t;
-    buildMode = 'trap';
-    setBuildMode('trap');
-  });
-  obstaclePicks.appendChild(b);
-}
-(obstaclePicks.querySelector('.icon-btn') as HTMLButtonElement)?.classList.add('selected');
-
-for (const t of TRACK_PIECE_TYPES) {
-  const b = makeIconBtn(TRACK_PIECE_ICONS[t], TRACK_PIECE_LABELS[t], false, () => {
-    selectedTrackPiece = t;
-    buildMode = 'track';
-    setBuildMode('track');
-  });
-  trackPicks.appendChild(b);
-}
-(trackPicks.querySelector('.icon-btn') as HTMLButtonElement)?.classList.add('selected');
 
 function enterGame(): void {
   hide(menu); hide(lobby); show(gameRoot);
@@ -279,7 +297,7 @@ function renderLobby(s: RoomState): void {
 }
 
 function renderHud(s: RoomState): void {
-  const phaseNames: Record<string, string> = { racing: 'RUN!', placing: 'BUILD', countdown: 'GET READY' };
+  const phaseNames: Record<string, string> = { racing: 'RUN!', picking: 'PICK', placing: 'PLACE', countdown: 'GET READY' };
   hudPhase.textContent = phaseNames[s.phase] ?? s.phase.toUpperCase();
   hudRound.textContent = s.round ? `Round ${s.round}` : '';
   const me = s.players.find((p) => p.id === net.myId());
@@ -322,13 +340,28 @@ function renderHud(s: RoomState): void {
       const dnf = car?.eliminated ? ` <em>(DNF${car.eliminateReason ? ': ' + car.eliminateReason : ''})</em>` : '';
       return `<div>${i + 1}. ${p?.name ?? '?'}${dnf} <strong>+${pts}</strong></div>`;
     });
-    resultsOverlay.innerHTML = `<h2>Run Results</h2>${lines.join('')}<p class="hint">Place one trap or track piece…</p>`;
+    resultsOverlay.innerHTML = `<h2>Run Results</h2>${lines.join('')}<p class="hint">Next: pick one item from the shared pool…</p>`;
     show(resultsOverlay);
   } else hide(resultsOverlay);
 
   if (s.phase === 'placing') {
     show(placeUi);
     const meP = s.players.find((p) => p.id === net.myId());
+    const claim = meP?.claim ?? null;
+    if (claim) {
+      buildMode = claim.kind;
+      if (claim.kind === 'trap') selectedObstacle = claim.type as ObstacleType;
+      else selectedTrackPiece = claim.type as TrackPieceType;
+      itemSelected = true;
+      placeItem.innerHTML = `<span class="ico">${itemIcon(claim.kind, claim.type)}</span><span>Your item: <strong>${itemLabel(claim.kind, claim.type)}</strong></span>`;
+      placeHint.textContent = claim.kind === 'trap'
+        ? 'Left-click ANYWHERE on the map to place it · R rotates · Esc skip'
+        : 'Left-click a green socket to attach it · Esc skip';
+    } else {
+      itemSelected = false;
+      placeItem.textContent = 'No item this round — sit tight.';
+      placeHint.textContent = '';
+    }
     const placedCount = s.players.filter((p) => p.connected && p.hasPlaced).length;
     const total = s.players.filter((p) => p.connected).length;
     placeTimer.textContent = `${s.placeTimeLeft}s`;
@@ -337,7 +370,7 @@ function renderHud(s: RoomState): void {
       scene?.setPlacing(false);
       itemSelected = false;
     } else {
-      placeTurn.textContent = `Build — one item (${placedCount}/${total})`;
+      placeTurn.textContent = `Place it! (${placedCount}/${total} placed)`;
       scene?.setPlacing(true);
       scene?.setGhostType(buildMode === "trap" ? selectedObstacle : null);
     }
@@ -355,7 +388,16 @@ function renderHud(s: RoomState): void {
 }
 
 function onState(s: RoomState): void {
+  try {
+    onStateInner(s);
+  } catch (err) {
+    reportError('roomState', err);
+  }
+}
+
+function onStateInner(s: RoomState): void {
   state = s;
+  graceReceivedAt = performance.now();
   if (s.phase === 'lobby') {
     hide(menu); show(lobby); hide(gameRoot);
     renderLobby(s);
@@ -364,6 +406,7 @@ function onState(s: RoomState): void {
   enterGame();
   ensureScene().sync(s);
   renderHud(s);
+  renderPick(s);
   renderLobby(s);
 
   const myCar = s.cars.find((c) => c.id === net.myId());
@@ -375,6 +418,14 @@ function onState(s: RoomState): void {
 net.onRoomState(onState);
 net.onCarsUpdate((update) => {
   if (!scene || !state) return;
+  try {
+    applyCars(update);
+  } catch (err) {
+    reportError('carsUpdate', err);
+  }
+});
+function applyCars(update: Parameters<GameScene['applyCarsUpdate']>[0]): void {
+  if (!scene || !state) return;
   for (const c of update.cars) {
     const existing = state.cars.find((x) => x.id === c.id);
     if (existing) Object.assign(existing, c);
@@ -385,7 +436,7 @@ net.onCarsUpdate((update) => {
     hudPlace.textContent = `OUT${myCar.eliminateReason ? ': ' + myCar.eliminateReason : ''}`;
   }
   scene.applyCarsUpdate(update);
-});
+}
 net.onError((msg) => { menuError.textContent = msg; });
 
 function startLoop(): void {
@@ -393,10 +444,28 @@ function startLoop(): void {
   lastTick = performance.now();
   const tick = () => {
     loopTimer = requestAnimationFrame(tick) as unknown as number;
+    debugHandle.frames++;
     const now = performance.now();
     const dt = Math.min(0.05, (now - lastTick) / 1000);
     lastTick = now;
     if (!state || !scene) return;
+    try {
+      tickGame(dt);
+    } catch (err) {
+      reportError('tick', err);
+    }
+  };
+  tick();
+}
+
+function tickGame(dt: number): void {
+    if (!state || !scene) return;
+    // Grace countdown after the first finisher
+    if (state.phase === 'racing' && state.graceLeftMs > 0) {
+      const left = Math.max(0, state.graceLeftMs - (performance.now() - graceReceivedAt));
+      hudGrace.textContent = `⏱ ${Math.ceil(left / 1000)}s to finish!`;
+      show(hudGrace);
+    } else hide(hudGrace);
 
     if (state.phase === 'racing') {
       const myCar = state.cars.find((c) => c.id === net.myId());
@@ -410,10 +479,10 @@ function startLoop(): void {
             net.sendPose({ ...pose, input: { ...keys } });
           }
         }
-        // Client-side fall-off is confirmed by server; if local detects, keep sending pose so server eliminates
+        // Dropped below the death plane: tell the server right away (it eliminates)
         if (result.fellOff) {
           const pose = scene.getLocalPose();
-          if (pose) net.sendPose({ ...pose, y: 0, airborne: false, input: { ...keys } });
+          if (pose) net.sendPose({ ...pose, input: { ...keys } });
         }
       }
     }
@@ -427,8 +496,6 @@ function startLoop(): void {
         if (keys.back) scene.moveGhost(0, speed);
       }
     }
-  };
-  tick();
 }
 
 function bindKey(code: string, down: boolean): void {

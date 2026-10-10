@@ -12,6 +12,11 @@ import {
   InputState,
   PoseUpdate,
   FRUITS,
+  PICK_DURATION_SEC,
+  FINISH_GRACE_SEC,
+  RACE_MAX_SEC,
+  DEATH_DEPTH,
+  RUN_TURN_RATE_MAX,
   MAP_HALF_SIZE,
   DEFAULT_TARGET_SCORE,
   MAX_PLAYERS,
@@ -20,6 +25,7 @@ import {
   TRACK_PIECE_TYPES,
   PLACE_DURATION_SEC,
 } from '../shared/types.js';
+import type { PickItem } from '../shared/types.js';
 import {
   TrackWorld,
   createStarterTrack,
@@ -75,6 +81,14 @@ export class Room {
   private prevWp = new Map<string, number>();
   private prevPos = new Map<string, { x: number; z: number }>();
   private passedMid = new Map<string, boolean>();
+  pickPool: PickItem[] = [];
+  pickTimeLeft = 0;
+  private pickTimer: ReturnType<typeof setInterval> | null = null;
+  private pickSeq = 0;
+  private firstFinishAt = 0;
+  private lastGraceBroadcast = 0;
+  private offGroundTicks = new Map<string, number>();
+  private lastPoseAt = new Map<string, number>();
 
   constructor(
     code: string,
@@ -114,6 +128,7 @@ export class Room {
       name: name.slice(0, 16) || 'Runner',
       color: fruit.color,
       fruit: fruit.type,
+      claim: null,
       score: 0,
       ready: false,
       connected: true,
@@ -143,6 +158,9 @@ export class Room {
       p.hasPlaced = true;
       this.checkPlacingDone();
     }
+    if (this.phase === 'picking') this.checkPickingDone();
+    // A runner leaving mid-race must not stall the round
+    if (this.phase === 'racing') this.checkRaceEnd();
 
     const connected = [...this.players.values()].filter((x) => x.connected).length;
     if (connected < 1) return true;
@@ -150,6 +168,7 @@ export class Room {
       this.phase = 'gameover';
       this.stopSim();
       this.clearPlaceTimer();
+      this.clearPickTimer();
       this.winnerId = [...this.players.values()].find((x) => x.connected)?.id ?? null;
       this.broadcast();
     } else {
@@ -190,6 +209,12 @@ export class Room {
 
   private beginRace(): void {
     this.clearPlaceTimer();
+    this.clearPickTimer();
+    this.pickPool = [];
+    this.firstFinishAt = 0;
+    this.offGroundTicks.clear();
+    this.lastPoseAt.clear();
+    for (const p of this.players.values()) p.claim = null;
     this.round += 1;
     this.finishOrder = [];
     this.winnerId = null;
@@ -303,13 +328,40 @@ export class Room {
       z = car.z + dz * t;
     }
 
-    // Fall off asphalt = DNF (no walls to catch you). Grace while airborne from ramp.
-    if (!airborne && y < 0.4 && !isOnAsphalt(this.track, x, z)) {
-      this.eliminate(car, 'Fell off the track');
-      return;
+    // Turn-rate validation: keep yaw change within the running turn rate (spins excepted)
+    const nowMs = Date.now();
+    const lastAt = this.lastPoseAt.get(id) ?? nowMs - 50;
+    this.lastPoseAt.set(id, nowMs);
+    if (car.spinning <= 0) {
+      const elapsed = Math.min(0.3, Math.max(0.016, (nowMs - lastAt) / 1000));
+      const maxTurn = RUN_TURN_RATE_MAX * elapsed * 1.6 + 0.08;
+      let dYaw = yaw - car.yaw;
+      while (dYaw > Math.PI) dYaw -= Math.PI * 2;
+      while (dYaw < -Math.PI) dYaw += Math.PI * 2;
+      if (Math.abs(dYaw) > maxTurn) yaw = car.yaw + Math.sign(dYaw) * maxTurn;
     }
 
     const surf = surfaceHeightAt(this.track, this.obstacles, x, z);
+    const onAsphalt = isOnAsphalt(this.track, x, z);
+    // Ground exists under you only on asphalt or a ramp, and only if you haven't already dropped below it
+    const hasGround = (onAsphalt || surf.onRamp) && y > -0.6;
+
+    // Death plane: falling a short distance below the track = out for the round
+    if (y < -DEATH_DEPTH + 0.05) {
+      this.eliminate(car, 'Fell off the track');
+      return;
+    }
+    // Standing "on air" off the asphalt (stale/old client): give ~0.5s then out
+    if (!hasGround && !airborne && y > -0.3) {
+      const n = (this.offGroundTicks.get(id) ?? 0) + 1;
+      this.offGroundTicks.set(id, n);
+      if (n > 10) {
+        this.eliminate(car, 'Fell off the track');
+        return;
+      }
+    } else {
+      this.offGroundTicks.set(id, 0);
+    }
 
     if (car.spinning > 0) {
       car.spinning = Math.max(0, car.spinning - 0.05);
@@ -378,7 +430,10 @@ export class Room {
     if (car.icy > 0) car.icy = Math.max(0, car.icy - 0.05);
 
     // Simple air settle on server for consistency
-    if (airborne || y > 0.05) {
+    if (!hasGround) {
+      // falling: trust client's y (it integrates gravity); just mark airborne
+      airborne = true;
+    } else if (airborne || y > 0.05) {
       vy -= 28 * 0.05;
       y += vy * 0.05;
       if (y <= surf.y) {
@@ -423,6 +478,10 @@ export class Room {
       car.laps = 1;
       car.finishPlace = this.finishOrder.length + 1;
       this.finishOrder.push(id);
+      if (!this.firstFinishAt) {
+        this.firstFinishAt = Date.now();
+        this.broadcast(); // clients start the grace countdown
+      }
       this.checkRaceEnd();
     }
 
@@ -435,38 +494,36 @@ export class Room {
     car.eliminateReason = reason;
     car.speed = 0;
     car.vy = 0;
-    // Park slightly off — clients hide/spectate
-    car.y = -2;
+    // Park below — clients hide/spectate
+    car.y = -DEATH_DEPTH;
+    // ROOT-CAUSE FIX: an elimination can be the last thing that ends a race
+    this.checkRaceEnd();
   }
 
   private startSim(): void {
     this.stopSim();
     // Lightweight tick: soft car-car separation + timeout only (poses drive motion)
     this.tickTimer = setInterval(() => {
-      this.softSeparate();
-      if (this.raceStartedAt && Date.now() - this.raceStartedAt > 120000) {
-        const unfinished = [...this.cars.values()]
-          .filter((c) => !c.finished && !c.eliminated)
-          .sort((a, b) => b.lapProgress - a.lapProgress);
-        for (const c of unfinished) {
-          c.finished = true;
-          c.speed = 0;
-          c.finishPlace = this.finishOrder.length + 1;
-          this.finishOrder.push(c.id);
+      this.safe('raceTick', () => {
+        if (this.phase !== 'racing') return;
+        this.softSeparate();
+        const now = Date.now();
+        if (this.firstFinishAt && now - this.firstFinishAt > FINISH_GRACE_SEC * 1000) {
+          this.timeOutRace('Too slow (time up)');
+        } else if (this.raceStartedAt && now - this.raceStartedAt > RACE_MAX_SEC * 1000) {
+          this.timeOutRace('Race time limit');
+        } else if (this.firstFinishAt && now - this.lastGraceBroadcast > 1000) {
+          this.lastGraceBroadcast = now;
+          this.broadcast();
+        } else {
+          // belt-and-braces: end if everyone is already done
+          this.checkRaceEnd();
         }
-        for (const c of this.cars.values()) {
-          if (c.eliminated && !this.finishOrder.includes(c.id)) {
-            c.finishPlace = this.finishOrder.length + 1;
-            this.finishOrder.push(c.id);
-          }
-        }
-        this.raceStartedAt = 0;
-        this.endRace();
-      }
+      });
     }, TICK_MS);
 
     this.broadcastTimer = setInterval(() => {
-      this.emitCars(this.getCarsUpdate());
+      this.safe('carsBroadcast', () => this.emitCars(this.getCarsUpdate()));
     }, BROADCAST_MS);
   }
 
@@ -504,7 +561,29 @@ export class Room {
     }
   }
 
+  /** Run a timer/handler body without letting one exception kill the room loop. */
+  private safe(label: string, fn: () => void): void {
+    try {
+      fn();
+    } catch (err) {
+      console.error(`[room ${this.code}] ${label} failed:`, err);
+    }
+  }
+
+  /** Grace window / hard cap expired: everyone still running is a DNF. */
+  private timeOutRace(reason: string): void {
+    for (const c of this.cars.values()) {
+      if (c.finished || c.eliminated) continue;
+      c.eliminated = true;
+      c.eliminateReason = reason;
+      c.speed = 0;
+    }
+    this.raceStartedAt = 0;
+    this.endRace();
+  }
+
   private checkRaceEnd(): void {
+    if (this.phase !== 'racing') return;
     const active = [...this.cars.values()].filter((c) => this.players.get(c.id)?.connected);
     if (active.length === 0) return;
     // Done when every connected car finished or was eliminated
@@ -512,7 +591,9 @@ export class Room {
   }
 
   private endRace(): void {
+    if (this.phase !== 'racing') return; // never end twice
     this.stopSim();
+    this.firstFinishAt = 0;
     // Survivors still racing → place by progress
     const unfinished = [...this.cars.values()]
       .filter((c) => !c.finished && !c.eliminated)
@@ -549,17 +630,17 @@ export class Room {
         this.broadcast();
         return;
       }
-      this.beginPlacing();
+      this.safe('beginPicking', () => this.beginPicking());
     }, 3000);
   }
 
   private beginPlacing(): void {
     this.phase = 'placing';
     this.placeTimeLeft = PLACE_DURATION_SEC;
-    for (const p of this.players.values()) p.hasPlaced = !p.connected;
+    for (const p of this.players.values()) p.hasPlaced = !p.connected || !p.claim;
     this.broadcast();
     this.clearPlaceTimer();
-    this.placeTimer = setInterval(() => {
+    this.placeTimer = setInterval(() => this.safe('placeTimer', () => {
       this.placeTimeLeft -= 1;
       if (this.placeTimeLeft <= 0) {
         this.placeTimeLeft = 0;
@@ -567,7 +648,99 @@ export class Room {
       } else {
         this.broadcast();
       }
-    }, 1000);
+    }), 1000);
+    // everyone might already be done (no claims)
+    this.checkPlacingDone();
+  }
+
+  /** Shared pool: (connected players + 2) options, always at least 2 track pieces. */
+  private generatePool(): PickItem[] {
+    const n = [...this.players.values()].filter((p) => p.connected).length + 2;
+    const rnd = <T,>(arr: readonly T[]) => arr[Math.floor(Math.random() * arr.length)];
+    const trackCount = Math.min(n, Math.max(2, Math.round(n * 0.35)));
+    const items: PickItem[] = [];
+    for (let i = 0; i < n; i++) {
+      const isTrack = i < trackCount;
+      items.push({
+        id: `pk-${++this.pickSeq}`,
+        kind: isTrack ? 'track' : 'trap',
+        type: isTrack ? rnd(TRACK_PIECE_TYPES) : rnd(OBSTACLE_TYPES),
+        claimedBy: null,
+      });
+    }
+    // shuffle so track pieces aren't always first
+    for (let i = items.length - 1; i > 0; i--) {
+      const j = Math.floor(Math.random() * (i + 1));
+      [items[i], items[j]] = [items[j], items[i]];
+    }
+    return items;
+  }
+
+  private beginPicking(): void {
+    this.phase = 'picking';
+    for (const p of this.players.values()) {
+      p.claim = null;
+      p.hasPlaced = false;
+    }
+    this.pickPool = this.generatePool();
+    this.pickTimeLeft = PICK_DURATION_SEC;
+    this.broadcast();
+    this.clearPickTimer();
+    this.pickTimer = setInterval(() => this.safe('pickTimer', () => {
+      this.pickTimeLeft -= 1;
+      if (this.pickTimeLeft <= 0) {
+        this.pickTimeLeft = 0;
+        this.finishPicking();
+      } else {
+        this.broadcast();
+      }
+    }), 1000);
+  }
+
+  claimPick(id: string, itemId: string): { ok: boolean; error?: string } {
+    if (this.phase !== 'picking') return { ok: false, error: 'Not pick phase' };
+    const p = this.players.get(id);
+    if (!p?.connected) return { ok: false, error: 'Not in room' };
+    if (p.claim) return { ok: false, error: 'You already picked' };
+    const item = this.pickPool.find((i) => i.id === itemId);
+    if (!item) return { ok: false, error: 'No such item' };
+    if (item.claimedBy) {
+      const who = this.players.get(item.claimedBy)?.name ?? 'someone';
+      return { ok: false, error: `Too slow — ${who} took it` };
+    }
+    item.claimedBy = id; // first click wins (Node is single-threaded: no race)
+    p.claim = { kind: item.kind, type: item.type };
+    this.checkPickingDone();
+    return { ok: true };
+  }
+
+  private checkPickingDone(): void {
+    if (this.phase !== 'picking') return;
+    const need = [...this.players.values()].filter((p) => p.connected);
+    if (need.length > 0 && need.every((p) => p.claim)) this.finishPicking();
+    else this.broadcast();
+  }
+
+  /** Timer ran out or all picked: stragglers get a random leftover, then place phase. */
+  private finishPicking(): void {
+    if (this.phase !== 'picking') return;
+    this.clearPickTimer();
+    for (const p of this.players.values()) {
+      if (!p.connected || p.claim) continue;
+      const left = this.pickPool.filter((i) => !i.claimedBy);
+      if (!left.length) break;
+      const item = left[Math.floor(Math.random() * left.length)];
+      item.claimedBy = p.id;
+      p.claim = { kind: item.kind, type: item.type };
+    }
+    this.beginPlacing();
+  }
+
+  private clearPickTimer(): void {
+    if (this.pickTimer) {
+      clearInterval(this.pickTimer);
+      this.pickTimer = null;
+    }
   }
 
   private clearPlaceTimer(): void {
@@ -607,6 +780,7 @@ export class Room {
     if (!p?.connected) return { ok: false, error: 'Not in room' };
     if (p.hasPlaced) return { ok: false, error: 'Already placed this round (one item only)' };
     if (!OBSTACLE_TYPES.includes(type)) return { ok: false, error: 'Invalid type' };
+    if (!p.claim || p.claim.kind !== 'trap' || p.claim.type !== type) return { ok: false, error: 'You can only place the item you picked' };
     const bad = this.validateTrapSpot(x, z);
     if (bad) return { ok: false, error: bad };
     if (this.obstacles.length >= 80) return { ok: false, error: 'Too many traps on the map' };
@@ -649,6 +823,7 @@ export class Room {
     if (!p?.connected) return { ok: false, error: 'Not in room' };
     if (p.hasPlaced) return { ok: false, error: 'Already placed this round (one item only)' };
     if (!TRACK_PIECE_TYPES.includes(type)) return { ok: false, error: 'Invalid piece' };
+    if (!p.claim || p.claim.kind !== 'track' || p.claim.type !== type) return { ok: false, error: 'You can only place the item you picked' };
 
     const result = placeTrackPiece(this.track, type, socketId, id);
     if (!result.ok) return result;
@@ -670,7 +845,10 @@ export class Room {
       p.score = 0;
       p.ready = false;
       p.hasPlaced = false;
+      p.claim = null;
     }
+    this.pickPool = [];
+    this.clearPickTimer();
     this.obstacles = [];
     this.track = createStarterTrack();
     this.round = 0;
@@ -722,6 +900,11 @@ export class Room {
       targetScore: this.targetScore,
       round: this.round,
       placeTimeLeft: this.placeTimeLeft,
+      pickTimeLeft: this.pickTimeLeft,
+      pickPool: this.pickPool,
+      graceLeftMs: this.firstFinishAt && this.phase === 'racing'
+        ? Math.max(0, FINISH_GRACE_SEC * 1000 - (Date.now() - this.firstFinishAt))
+        : 0,
       countdown: this.countdown,
       winnerId: this.winnerId,
       finishOrder: this.finishOrder,
@@ -736,6 +919,7 @@ export class Room {
 
   destroy(): void {
     this.stopSim();
+    this.clearPickTimer();
     this.clearCountdown();
     this.clearPlaceTimer();
   }

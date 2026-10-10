@@ -76,3 +76,8 @@ export function onError(cb: (msg: string) => void): void {
 export function myId(): string {
   return getSocket().id || '';
 }
+export function claimPick(itemId: string) {
+  return new Promise<{ ok: boolean; error?: string }>((resolve) => {
+    getSocket().emit('claimPick', { itemId }, resolve);
+  });
+}

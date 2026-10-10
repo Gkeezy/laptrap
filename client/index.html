@@ -58,18 +58,22 @@
           <div id="hud-countdown" class="hidden"></div>
           <div id="hud-banner" class="hidden"></div>
           <div id="scoreboard"></div>
+          <div id="hud-grace" class="hidden"></div>
+          <div id="pick-ui" class="hidden">
+            <div class="place-header">
+              <p id="pick-title">Pick one — first click wins!</p>
+              <p id="pick-timer" class="timer"></p>
+            </div>
+            <div id="pick-grid" class="pick-grid"></div>
+            <p class="hint" id="pick-status"></p>
+          </div>
           <div id="place-ui" class="hidden">
             <div class="place-header">
               <p id="place-turn"></p>
               <p id="place-timer" class="timer"></p>
             </div>
-            <div class="place-tabs">
-              <button id="tab-trap" class="btn tiny selected" type="button">Traps</button>
-              <button id="tab-track" class="btn tiny" type="button">Track</button>
-            </div>
-            <div id="obstacle-picks" class="icon-grid"></div>
-            <div id="track-picks" class="icon-grid hidden"></div>
-            <p class="hint" id="place-hint">Select an item, then left-click the map to place · Esc skip</p>
+            <div id="place-item" class="place-item"></div>
+            <p class="hint" id="place-hint">Left-click the map to place your item · Esc skip</p>
             <button id="btn-skip-place" class="btn">Skip</button>
           </div>
           <div id="results-overlay" class="hidden"></div>

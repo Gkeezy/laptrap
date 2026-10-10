@@ -1,6 +1,6 @@
 /** Shared types for Laptrap client & server */
 
-export type Phase = 'lobby' | 'countdown' | 'racing' | 'placing' | 'results' | 'gameover';
+export type Phase = 'lobby' | 'countdown' | 'racing' | 'results' | 'picking' | 'placing' | 'gameover';
 
 export type ObstacleType =
   | 'barrier'
@@ -87,6 +87,21 @@ export const DEFAULT_TARGET_SCORE = 15;
 export const MAX_PLAYERS = 10;
 export const MIN_PLAYERS = 2;
 export const PLACE_DURATION_SEC = 25;
+/** Shared pick pool phase length */
+export const PICK_DURATION_SEC = 15;
+/** After the first runner finishes, the rest have this long before they DNF */
+export const FINISH_GRACE_SEC = 15;
+/** Hard cap on a single race */
+export const RACE_MAX_SEC = 120;
+/** Fall this far below the track surface and you're out */
+export const DEATH_DEPTH = 5;
+/** Running turn rates (rad/s): full rate at standstill, MIN at top speed */
+export const RUN_TURN_RATE_MAX = 1.9;
+export const RUN_TURN_RATE_MIN = 1.3;
+/** Steering eases in: steer input ramps 0→1 at this rate per second */
+export const STEER_EASE_IN = 4;
+export const STEER_EASE_OUT = 8;
+
 
 export interface PlayerPublic {
   id: string;
@@ -98,6 +113,18 @@ export interface PlayerPublic {
   isHost: boolean;
   hasPlaced: boolean;
   fruit: FruitType;
+  /** Item claimed from the shared pick pool this round (null = none yet) */
+  claim: PickClaim | null;
+}
+
+export type PickKind = 'trap' | 'track';
+export interface PickClaim {
+  kind: PickKind;
+  type: ObstacleType | TrackPieceType;
+}
+export interface PickItem extends PickClaim {
+  id: string;
+  claimedBy: string | null;
 }
 
 export interface CarState {
@@ -170,6 +197,10 @@ export interface RoomState {
   targetScore: number;
   round: number;
   placeTimeLeft: number;
+  pickTimeLeft: number;
+  pickPool: PickItem[];
+  /** ms left in the post-first-finish grace window (0 = not running) */
+  graceLeftMs: number;
   countdown: number;
   winnerId: string | null;
   finishOrder: string[];
@@ -231,6 +262,7 @@ export interface ClientToServerEvents {
   placeObstacle: (payload: { type: ObstacleType; x: number; z: number; yaw: number }, cb: (res: { ok: boolean; error?: string }) => void) => void;
   placeTrackPiece: (payload: { type: TrackPieceType; socketId: string }, cb: (res: { ok: boolean; error?: string }) => void) => void;
   skipPlace: () => void;
+  claimPick: (payload: { itemId: string }, cb: (res: { ok: boolean; error?: string }) => void) => void;
   rematch: () => void;
   leaveRoom: () => void;
 }

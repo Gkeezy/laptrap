@@ -11,7 +11,14 @@ import type {
   TrackPiece,
   TrackSocket,
 } from '../../../shared/types';
-import { TRACK, MAP_HALF_SIZE } from '../../../shared/types';
+import {
+  TRACK, MAP_HALF_SIZE, DEATH_DEPTH, RUN_TURN_RATE_MAX, RUN_TURN_RATE_MIN, STEER_EASE_IN, STEER_EASE_OUT,
+} from '../../../shared/types';
+
+/** Grass sits well below the track so a fall off the edge is visible before the death plane */
+const GROUND_Y = -(DEATH_DEPTH + 4);
+/** Client is a hair stricter than the server (0.35) so it starts falling first */
+const ASPHALT_HALF = TRACK.width / 2 + 0.25;
 
 interface Snapshot {
   x: number;
@@ -30,6 +37,7 @@ interface CarRender {
   localSpeed: number;
   localBoost: number;
   padBoost: number;
+  steer: number;
   localVy: number;
   airborne: boolean;
   spinning: number;
@@ -94,6 +102,7 @@ export class GameScene {
   private finishGate: THREE.Group | null = null;
   private animId = 0;
   private jumpHeld = false;
+  frameErrors = 0;
   private lastFrame = performance.now();
   private ghostType: Obstacle['type'] | null = null;
   private ghostPreview: THREE.Object3D | null = null;
@@ -129,7 +138,7 @@ export class GameScene {
       new THREE.MeshLambertMaterial({ color: 0x3d8c40 }),
     );
     ground.rotation.x = -Math.PI / 2;
-    ground.position.y = -0.05;
+    ground.position.y = GROUND_Y;
     this.scene.add(ground);
     this.scene.add(new THREE.AmbientLight(0xffffff, 0.55));
     const sun = new THREE.DirectionalLight(0xfff2d6, 1.05);
@@ -444,6 +453,7 @@ export class GameScene {
           cr.localZ = car.z;
           cr.localYaw = car.yaw;
           cr.localSpeed = 0;
+          cr.steer = 0;
           cr.localBoost = car.boost;
           cr.localVy = 0;
           cr.airborne = false;
@@ -479,6 +489,7 @@ export class GameScene {
       mesh.position.x = ob.x;
       mesh.position.z = ob.z;
       mesh.rotation.y = ob.yaw;
+      this.updateTrapPillar(mesh, ob.x, ob.z);
     }
     const obIds = new Set(state.obstacles.map((o) => o.id));
     for (const [id, mesh] of this.obstacleMeshes) {
@@ -536,6 +547,7 @@ export class GameScene {
       localSpeed: 0,
       localBoost: 100,
       padBoost: 0,
+      steer: 0,
       localVy: 0,
       airborne: false,
       spinning: 0,
@@ -609,10 +621,15 @@ export class GameScene {
       cr.localYaw += 5 * dt;
       cr.localSpeed *= Math.max(0, 1 - 1.2 * dt);
     } else if (!cr.airborne) {
-      // Running: snappy turning (even at low speed), quick accel, quick stop
-      const turnRate = 4.2 - Math.min(Math.abs(cr.localSpeed) * 0.03, 1.0);
-      if (input.left) cr.localYaw += turnRate * dt;
-      if (input.right) cr.localYaw -= turnRate * dt;
+      // Running: eased steering (ramps in over ~0.25s), gentler at speed
+      const target = (input.left ? 1 : 0) - (input.right ? 1 : 0);
+      const reversing = target !== 0 && cr.steer !== 0 && Math.sign(target) !== Math.sign(cr.steer);
+      const rate = target === 0 || reversing ? STEER_EASE_OUT : STEER_EASE_IN;
+      const delta = target - cr.steer;
+      cr.steer += Math.sign(delta) * Math.min(Math.abs(delta), rate * dt);
+      const speedFrac = Math.min(1, Math.abs(cr.localSpeed) / 30);
+      const turnRate = RUN_TURN_RATE_MAX - (RUN_TURN_RATE_MAX - RUN_TURN_RATE_MIN) * speedFrac;
+      cr.localYaw += cr.steer * turnRate * dt;
       if (input.forward) cr.localSpeed += 55 * dt;
       if (input.back) cr.localSpeed -= 55 * dt;
       // Jump (Space): edge-triggered hop while grounded
@@ -643,6 +660,20 @@ export class GameScene {
       cr.localY = Math.max(cr.localY, surfY + 0.15);
     }
 
+    // Is there anything under us? Asphalt or a ramp, and only if we haven't dropped below the surface.
+    const onAsphalt = this.distanceOffAsphalt(cr.localX, cr.localZ) <= ASPHALT_HALF;
+    const hasGround = (onAsphalt || onRamp) && cr.localY > -0.6;
+    if (!hasGround) {
+      // Ran off the edge (or dropped below it): real fall, no steering, keep some momentum
+      cr.airborne = true;
+      cr.steer = 0;
+      cr.localVy -= 32 * dt;
+      cr.localY += cr.localVy * dt;
+      cr.localSpeed *= Math.max(0, 1 - 0.8 * dt);
+      this.jumpHeld = input.jump;
+      return { fellOff: cr.localY < -DEATH_DEPTH };
+    }
+
     if (cr.airborne || cr.localY > surfY + 0.05) {
       cr.localVy -= 32 * dt;
       cr.localY += cr.localVy * dt;
@@ -661,14 +692,24 @@ export class GameScene {
 
     this.jumpHeld = input.jump;
 
-    // Soft stay near asphalt while grounded — if far, signal fall-off
-    if (!cr.airborne && cr.localY < 0.5) {
-      const off = this.distanceOffAsphalt(cr.localX, cr.localZ);
-      if (off > TRACK.width / 2 + 0.6) {
-        return { fellOff: true };
-      }
-    }
     return { fellOff: false };
+  }
+
+  /** Traps placed off the asphalt stand on a stone post down to the grass far below. */
+  private updateTrapPillar(mesh: THREE.Object3D, x: number, z: number): void {
+    const off = this.distanceOffAsphalt(x, z) > ASPHALT_HALF;
+    let pillar = mesh.getObjectByName('pillar');
+    if (off && !pillar) {
+      const h = -GROUND_Y;
+      pillar = new THREE.Mesh(
+        new THREE.CylinderGeometry(0.9, 1.2, h, 7),
+        new THREE.MeshLambertMaterial({ color: 0x8a8174, flatShading: true }),
+      );
+      pillar.name = 'pillar';
+      pillar.position.y = -h / 2 - 0.02;
+      mesh.add(pillar);
+    }
+    if (pillar) pillar.visible = off;
   }
 
   private distanceOffAsphalt(x: number, z: number): number {
@@ -874,9 +915,15 @@ export class GameScene {
       this.animId = requestAnimationFrame(loop);
       const now = performance.now();
       last = now;
-      this.renderCars(now);
-      this.updateCamera(now);
-      this.renderer.render(this.scene, this.camera);
+      // One bad frame must never kill the loop: log and keep rendering
+      try {
+        this.renderCars(now);
+        this.updateCamera(now);
+        this.renderer.render(this.scene, this.camera);
+      } catch (err) {
+        this.frameErrors++;
+        if (this.frameErrors < 20 || this.frameErrors % 300 === 0) console.error('[laptrap] render frame failed', err);
+      }
     };
     loop();
   }
@@ -921,16 +968,29 @@ export class GameScene {
         cr.mesh.rotation.y = lerpAngle(a.yaw, b.yaw, t);
       }
       const spd = estimateRemoteSpeed(cr.mesh, dt);
-      const air = !!cr.mesh.userData.airborne || cr.mesh.position.y > 0.4;
+      const air = !!cr.mesh.userData.airborne || Math.abs(cr.mesh.position.y) > 0.4;
       animateFruit(cr.mesh, spd, air, dt, now);
     }
   }
 
+  private placementOverview(): { x: number; z: number; h: number } {
+    let minX = Infinity, maxX = -Infinity, minZ = Infinity, maxZ = -Infinity;
+    for (const pc of this.pieces) {
+      minX = Math.min(minX, pc.x); maxX = Math.max(maxX, pc.x);
+      minZ = Math.min(minZ, pc.z); maxZ = Math.max(maxZ, pc.z);
+    }
+    if (!Number.isFinite(minX)) return { x: 0, z: 0, h: 60 };
+    const span = Math.max(maxX - minX, maxZ - minZ) + 40;
+    return { x: (minX + maxX) / 2, z: (minZ + maxZ) / 2, h: Math.max(60, span * 1.05) };
+  }
+
   private updateCamera(_now: number): void {
     if (this.placing) {
-      const t = this.ghostPos;
-      this.camTarget.lerp(new THREE.Vector3(t.x, 55, t.z + 12), 0.06);
-      this.camLook.lerp(new THREE.Vector3(t.x, 0, t.z), 0.06);
+      // Fixed overview of the whole course while placing. (It used to chase the ghost, which panned the
+      // view as you moved the mouse, so the spot under the cursor kept sliding away.)
+      const ov = this.placementOverview();
+      this.camTarget.lerp(new THREE.Vector3(ov.x, ov.h, ov.z + ov.h * 0.35), 0.08);
+      this.camLook.lerp(new THREE.Vector3(ov.x, 0, ov.z), 0.08);
     } else {
       const cr = this.cars.get(this.localId);
       if (cr && cr.mesh.visible) {

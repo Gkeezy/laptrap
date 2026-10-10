@@ -352,3 +352,30 @@ input {
 }
 
 .fruit-row { font-size: 1.6rem; letter-spacing: 0.15em; margin: 0.2rem 0 0.8rem; }
+
+/* Shared pick pool */
+#pick-ui {
+  position: absolute; left: 50%; top: 50%; transform: translate(-50%, -50%);
+  background: rgba(16, 20, 32, 0.92); border-radius: 14px; padding: 16px 18px;
+  width: min(640px, 94vw); pointer-events: auto; color: #fff; box-shadow: 0 10px 40px rgba(0,0,0,.45);
+}
+.pick-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(104px, 1fr)); gap: 10px; margin: 10px 0; }
+.pick-card {
+  display: flex; flex-direction: column; align-items: center; gap: 4px; padding: 10px 6px;
+  border-radius: 10px; border: 2px solid #3a4560; background: #222a3d; color: #fff; cursor: pointer;
+  font: inherit; transition: transform .08s, border-color .08s;
+}
+.pick-card:hover:not(:disabled) { transform: translateY(-2px); border-color: #ffd84a; }
+.pick-card .ico { font-size: 1.9rem; line-height: 1; }
+.pick-card .kind { font-size: .68rem; letter-spacing: .08em; opacity: .75; text-transform: uppercase; }
+.pick-card.track { border-color: #2f8f5b; }
+.pick-card.death { border-color: #b8323a; }
+.pick-card.claimed { opacity: .5; cursor: default; filter: grayscale(.6); }
+.pick-card.mine { opacity: 1; filter: none; border-color: #ffd84a; box-shadow: 0 0 0 2px #ffd84a inset; }
+.pick-card .who { font-size: .75rem; min-height: 1em; }
+.place-item { display: flex; align-items: center; gap: 10px; font-size: 1.05rem; margin: 6px 0; }
+.place-item .ico { font-size: 2rem; }
+#hud-grace {
+  position: absolute; top: 56px; left: 50%; transform: translateX(-50%);
+  background: rgba(200, 40, 40, .85); color: #fff; padding: 6px 14px; border-radius: 8px; font-weight: 700;
+}

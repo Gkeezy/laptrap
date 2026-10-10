@@ -444,9 +444,10 @@ export function surfaceHeightAt(
   obstacles: Array<{ type: string; x: number; z: number; yaw: number }>,
   x: number,
   z: number,
-): { y: number; rampBoost: number } {
+): { y: number; rampBoost: number; onRamp: boolean } {
   let y = 0;
   let rampBoost = 0;
+  let onRamp = false;
   for (const ob of obstacles) {
     if (ob.type !== 'ramp') continue;
     const dx = x - ob.x;
@@ -457,6 +458,7 @@ export function surfaceHeightAt(
     const along = dx * fx + dz * fz;
     const lat = dx * (-fz) + dz * fx; // rough lateral
     if (Math.abs(lat) < 2.2 && along > -1.2 && along < 3.5) {
+      onRamp = true;
       // Rising slope: 0 at entry → ~2.2 at crest
       const t = Math.max(0, Math.min(1, (along + 1.2) / 4.5));
       const h = t * 2.4;
@@ -466,7 +468,7 @@ export function surfaceHeightAt(
       }
     }
   }
-  return { y, rampBoost };
+  return { y, rampBoost, onRamp };
 }
 
 export function placeTrackPiece(
