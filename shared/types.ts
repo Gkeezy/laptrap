@@ -12,7 +12,9 @@ export type ObstacleType =
   | 'spikes'
   | 'mine';
 
-export type TrackPieceType = 'straight' | 'curveL' | 'curveR';
+export type TrackPieceType =
+  | 'straight' | 'curveL' | 'curveR'
+  | 'narrow' | 'plank' | 'gap' | 'sbend' | 'zigzag' | 'fork';
 
 export const OBSTACLE_TYPES: ObstacleType[] = [
   'barrier', 'ice', 'boost', 'ramp', 'oil', 'bomb', 'spikes', 'mine',
@@ -23,7 +25,9 @@ export const UTILITY_TRAPS: ObstacleType[] = ['barrier', 'ice', 'boost', 'ramp',
 /** Lethal death traps */
 export const DEATH_TRAPS: ObstacleType[] = ['bomb', 'spikes', 'mine'];
 
-export const TRACK_PIECE_TYPES: TrackPieceType[] = ['straight', 'curveL', 'curveR'];
+export const TRACK_PIECE_TYPES: TrackPieceType[] = [
+  'straight', 'curveL', 'curveR', 'narrow', 'plank', 'gap', 'sbend', 'zigzag', 'fork',
+];
 
 export const OBSTACLE_LABELS: Record<ObstacleType, string> = {
   barrier: 'Barrier',
@@ -51,12 +55,37 @@ export const TRACK_PIECE_LABELS: Record<TrackPieceType, string> = {
   straight: 'Straight',
   curveL: 'Curve L',
   curveR: 'Curve R',
+  narrow: 'Narrow',
+  plank: 'Plank Bridge',
+  gap: 'Jump Gap',
+  sbend: 'S-Bend',
+  zigzag: 'Zigzag',
+  fork: 'Fork',
 };
 
 export const TRACK_PIECE_ICONS: Record<TrackPieceType, string> = {
   straight: '➖',
   curveL: '↩️',
   curveR: '↪️',
+  narrow: '🥢',
+  plank: '🪵',
+  gap: '🕳️',
+  sbend: '🐍',
+  zigzag: '〽️',
+  fork: '🍴',
+};
+
+/** One-line hint shown on pick cards */
+export const TRACK_PIECE_HINTS: Record<TrackPieceType, string> = {
+  straight: 'Wide straight',
+  curveL: 'Wide left turn',
+  curveR: 'Wide right turn',
+  narrow: 'Thin straight, risky',
+  plank: 'Long, very thin bridge',
+  gap: 'Hole in the middle: jump it',
+  sbend: 'Chicane, shifts left',
+  zigzag: 'Wiggly, narrower',
+  fork: 'Splits around a hole, rejoins',
 };
 
 export type FruitType =
@@ -278,8 +307,24 @@ export interface ServerToClientEvents {
 export const MAP_HALF_SIZE = 200;
 
 export const TRACK = {
-  width: 10,
-  straightLen: 16,
-  curveRadius: 14,
+  /** Asphalt width: room for 5 fruits side by side plus traps */
+  width: 16,
+  /** Tile length (starter is 4 tiles = 88 units) */
+  straightLen: 22,
+  /** Centerline radius; inner edge stays at radius - width/2 = 12 */
+  curveRadius: 20,
   wallPad: 0.4,
+} as const;
+
+/** Starter course: this many straight tiles in a line (4 x 22 = 88 units) */
+export const STARTER_STRAIGHTS = 4;
+
+/** Spawn grid just past START: 5 lanes x 2 rows */
+export const SPAWN_GRID = { cols: 5, laneGap: 3, firstRow: 3, rowGap: 3.5 } as const;
+
+/** No-trap zone around START + spawn grid (relative to START, along its heading) */
+export const START_SAFE = {
+  back: 6,
+  ahead: SPAWN_GRID.firstRow + SPAWN_GRID.rowGap + 12,
+  halfWidth: TRACK.width / 2 + 3,
 } as const;

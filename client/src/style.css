@@ -355,9 +355,10 @@ input {
 
 /* Shared pick pool */
 #pick-ui {
-  position: absolute; left: 50%; top: 50%; transform: translate(-50%, -50%);
+  /* docked top-right so the course stays visible while picking */
+  position: absolute; right: 12px; top: 56px; left: auto; transform: none; max-height: calc(100% - 200px); overflow-y: auto;
   background: rgba(16, 20, 32, 0.92); border-radius: 14px; padding: 16px 18px;
-  width: min(640px, 94vw); pointer-events: auto; color: #fff; box-shadow: 0 10px 40px rgba(0,0,0,.45);
+  width: min(380px, 46vw); min-width: 240px; pointer-events: auto; color: #fff; box-shadow: 0 10px 40px rgba(0,0,0,.45);
 }
 .pick-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(104px, 1fr)); gap: 10px; margin: 10px 0; }
 .pick-card {
@@ -379,3 +380,12 @@ input {
   position: absolute; top: 56px; left: 50%; transform: translateX(-50%);
   background: rgba(200, 40, 40, .85); color: #fff; padding: 6px 14px; border-radius: 8px; font-weight: 700;
 }
+
+#cam-hint {
+  position: absolute; left: 12px; bottom: 16px; max-width: min(300px, 40vw);
+  background: rgba(10, 16, 28, .82); color: #dfe6f3; font-size: .78rem; line-height: 1.35;
+  padding: 8px 10px; border-radius: 10px; pointer-events: auto;
+}
+#cam-hint .btn { margin-top: 6px; }
+@media (max-width: 760px) { #cam-hint { display: none; } }
+.pick-card .tile-hint { font-size: .66rem; opacity: .8; text-align: center; line-height: 1.2; }

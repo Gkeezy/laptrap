@@ -7,6 +7,7 @@ import {
   TRACK_PIECE_LABELS,
   TRACK_PIECE_ICONS,
   FRUITS,
+  TRACK_PIECE_HINTS,
 } from '../../shared/types';
 
 const fruitOf = (f?: string) => FRUITS.find((x) => x.type === f);
@@ -45,6 +46,7 @@ const pickGrid = $('#pick-grid');
 const pickTimer = $('#pick-timer');
 const pickStatus = $('#pick-status');
 const hudGrace = $('#hud-grace');
+const camHint = $('#cam-hint');
 const resultsOverlay = $('#results-overlay');
 const gameoverOverlay = $('#gameover-overlay');
 const winnerText = $('#winner-text');
@@ -55,6 +57,10 @@ let scene: GameScene | null = null;
 let state: RoomState | null = null;
 // Read-only debug/test handle (used by automated browser tests)
 let graceReceivedAt = 0;
+/** Build-camera input state */
+const camKeys = { q: false, e: false };
+let lastMouse: { x: number; y: number } | null = null;
+let camDrag: { mode: 'pan' | 'rotate'; x: number; y: number; id: number } | null = null;
 const debugHandle = { frames: 0, errors: [] as string[], get phase() { return state?.phase; }, get state() { return state; }, get scene() { return scene; } };
 (window as unknown as { __laptrap: typeof debugHandle }).__laptrap = debugHandle;
 let selectedObstacle: ObstacleType = 'barrier';
@@ -85,7 +91,43 @@ function ensureScene(): GameScene {
     const canvas = $('#game-canvas') as HTMLCanvasElement;
     scene = new GameScene(canvas);
     scene.start();
+    // ---- Build camera: right/middle drag, wheel; left click stays reserved for placing ----
+    canvas.addEventListener('contextmenu', (e) => e.preventDefault());
+    canvas.addEventListener('pointerdown', (e) => {
+      if (!scene?.isBuildView() || e.button === 0) return;
+      e.preventDefault();
+      const rotate = e.button === 1 || e.shiftKey || e.altKey || e.ctrlKey;
+      camDrag = { mode: rotate ? 'rotate' : 'pan', x: e.clientX, y: e.clientY, id: e.pointerId };
+      canvas.setPointerCapture(e.pointerId);
+    });
+    canvas.addEventListener('pointermove', (e) => {
+      if (!camDrag || e.pointerId !== camDrag.id || !scene) return;
+      const dx = e.clientX - camDrag.x;
+      const dy = e.clientY - camDrag.y;
+      camDrag.x = e.clientX;
+      camDrag.y = e.clientY;
+      if (camDrag.mode === 'pan') scene.panBuildViewPixels(dx, dy);
+      else scene.rotateBuildView(-dx * 0.006, dy * 0.004);
+    });
+    const endDrag = (e: PointerEvent) => {
+      if (camDrag && e.pointerId === camDrag.id) {
+        camDrag = null;
+        if (canvas.hasPointerCapture(e.pointerId)) canvas.releasePointerCapture(e.pointerId);
+      }
+    };
+    canvas.addEventListener('pointerup', endDrag);
+    canvas.addEventListener('pointercancel', endDrag);
+    // Wheel anywhere over the game (incl. HUD panels) zooms, unless a panel actually needs to scroll
+    gameRoot.addEventListener('wheel', (e) => {
+      if (!scene?.isBuildView()) return;
+      const panel = (e.target as HTMLElement | null)?.closest?.('#pick-ui') as HTMLElement | null;
+      if (panel && panel.scrollHeight > panel.clientHeight + 2) return;
+      e.preventDefault();
+      scene.zoomBuildView(Math.exp(Math.max(-200, Math.min(200, e.deltaY)) * 0.0015));
+    }, { passive: false });
+    canvas.addEventListener('mouseleave', () => { lastMouse = null; });
     canvas.addEventListener('mousemove', (e) => {
+      lastMouse = { x: e.clientX, y: e.clientY };
       if (!scene?.placing || !state) return;
       const me = state.players.find((p) => p.id === net.myId());
       if (me?.hasPlaced) return;
@@ -184,6 +226,7 @@ $('#btn-copy').addEventListener('click', async () => {
   } catch { lobbyMsg.textContent = 'Copy failed'; }
 });
 $('#btn-skip-place').addEventListener('click', () => net.skipPlace());
+$('#btn-recenter').addEventListener('click', (e) => { e.stopPropagation(); scene?.resetBuildView(); });
 btnRematch.addEventListener('click', () => net.rematch());
 $('#btn-home').addEventListener('click', () => { net.leaveRoom(); location.href = '/'; });
 
@@ -226,7 +269,9 @@ function renderPick(s: RoomState): void {
       b.dataset.base = `pick-card ${item.kind}${death ? ' death' : ''}`;
       b.className = b.dataset.base;
       b.innerHTML = `<span class="ico">${itemIcon(item.kind, item.type)}</span><span>${itemLabel(item.kind, item.type)}</span>` +
-        `<span class="kind">${item.kind === 'track' ? 'track piece' : death ? 'death trap' : 'trap'}</span><span class="who"></span>`;
+        `<span class="kind">${item.kind === 'track' ? 'track tile' : death ? 'death trap' : 'trap'}</span>` +
+        (item.kind === 'track' ? `<span class="tile-hint">${TRACK_PIECE_HINTS[item.type as TrackPieceType]}</span>` : '') +
+        `<span class="who"></span>`;
       // pointerdown = fastest possible claim; server decides who was first
       b.addEventListener('pointerdown', async (ev) => {
         ev.preventDefault();
@@ -343,6 +388,10 @@ function renderHud(s: RoomState): void {
     resultsOverlay.innerHTML = `<h2>Run Results</h2>${lines.join('')}<p class="hint">Next: pick one item from the shared pool…</p>`;
     show(resultsOverlay);
   } else hide(resultsOverlay);
+
+  const building = s.phase === 'picking' || s.phase === 'placing';
+  scene?.setBuildView(building);
+  if (building) show(camHint); else hide(camHint);
 
   if (s.phase === 'placing') {
     show(placeUi);
@@ -486,14 +535,18 @@ function tickGame(dt: number): void {
         }
       }
     }
-    if (state.phase === 'placing') {
-      const me = state.players.find((p) => p.id === net.myId());
-      if (me && !me.hasPlaced) {
-        const speed = 0.55;
-        if (keys.left) scene.moveGhost(-speed, 0);
-        if (keys.right) scene.moveGhost(speed, 0);
-        if (keys.forward) scene.moveGhost(0, -speed);
-        if (keys.back) scene.moveGhost(0, speed);
+    if (scene.isBuildView()) {
+      // WASD / arrows pan, Q/E rotate
+      const k = dt * 60;
+      const right = (keys.right ? 1 : 0) - (keys.left ? 1 : 0);
+      const up = (keys.forward ? 1 : 0) - (keys.back ? 1 : 0);
+      if (right || up) scene.panBuildView(right * 1.2 * k, up * 1.2 * k);
+      const rot = (camKeys.e ? 1 : 0) - (camKeys.q ? 1 : 0);
+      if (rot) scene.rotateBuildView(rot * 1.6 * dt);
+      // camera may have moved under a still mouse: keep the ghost glued to the cursor
+      if (scene.placing && lastMouse) {
+        const hit = scene.screenToTrack(lastMouse.x, lastMouse.y);
+        if (hit) scene.updateGhostCursor(hit.x, hit.z, buildMode === 'track');
       }
     }
 }
@@ -506,6 +559,9 @@ function bindKey(code: string, down: boolean): void {
     case 'KeyD': case 'ArrowRight': keys.right = down; break;
     case 'Space': keys.jump = down; break;
     case 'KeyR': if (down && scene?.placing && buildMode === 'trap') scene.rotateGhost(Math.PI / 4); break;
+    case 'KeyQ': camKeys.q = down; break;
+    case 'KeyE': camKeys.e = down; break;
+    case 'KeyF': case 'KeyC': if (down && scene?.isBuildView()) scene.resetBuildView(); break;
   }
 }
 window.addEventListener('keydown', (e) => {

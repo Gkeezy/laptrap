@@ -11,7 +11,10 @@ import {
   TrackPieceType,
   TrackSocket,
   RaceMarkers,
+  STARTER_STRAIGHTS,
+  SPAWN_GRID,
 } from '../shared/types.js';
+import { forwardVec, tileExit, sampleTile, tileSteps, tileLength, pieceHalfWidth, leftVec, onAsphalt, TILE_SPECS } from '../shared/pieces.js';
 
 export interface Waypoint {
   x: number;
@@ -36,80 +39,32 @@ export interface TrackWorld {
   isLoop: boolean;
 }
 
-function forward(yaw: number): { x: number; z: number } {
-  return { x: Math.sin(yaw), z: Math.cos(yaw) };
-}
 function leftOf(yaw: number): { x: number; z: number } {
-  return { x: -Math.cos(yaw), z: Math.sin(yaw) };
+  return leftVec(yaw);
 }
 function rightOf(yaw: number): { x: number; z: number } {
-  return { x: Math.cos(yaw), z: -Math.sin(yaw) };
+  const l = leftVec(yaw);
+  return { x: -l.x, z: -l.z };
 }
 
+/** Geometry lives in shared/pieces.ts so client and server always agree. */
 export function pieceExit(piece: TrackPiece): { x: number; z: number; yaw: number } {
-  const { straightLen: L, curveRadius: R } = TRACK;
-  if (piece.type === 'straight') {
-    const f = forward(piece.yaw);
-    return { x: piece.x + f.x * L, z: piece.z + f.z * L, yaw: piece.yaw };
-  }
-  const sweep = Math.PI / 2;
-  const side = piece.type === 'curveL' ? leftOf(piece.yaw) : rightOf(piece.yaw);
-  const sign = piece.type === 'curveL' ? 1 : -1;
-  const cx = piece.x + side.x * R;
-  const cz = piece.z + side.z * R;
-  const relX = piece.x - cx;
-  const relZ = piece.z - cz;
-  const t = sign * sweep;
-  const cos = Math.cos(t);
-  const sin = Math.sin(t);
-  return {
-    x: cx + relX * cos - relZ * sin,
-    z: cz + relX * sin + relZ * cos,
-    yaw: piece.yaw + t,
-  };
+  return tileExit(piece);
 }
 
 export function samplePiece(piece: TrackPiece, steps = 8): Array<{ x: number; z: number; yaw: number }> {
-  const pts: Array<{ x: number; z: number; yaw: number }> = [];
-  const { straightLen: L, curveRadius: R } = TRACK;
-  if (piece.type === 'straight') {
-    const f = forward(piece.yaw);
-    for (let i = 0; i <= steps; i++) {
-      const t = i / steps;
-      pts.push({ x: piece.x + f.x * L * t, z: piece.z + f.z * L * t, yaw: piece.yaw });
-    }
-    return pts;
-  }
-  const sweep = Math.PI / 2;
-  const side = piece.type === 'curveL' ? leftOf(piece.yaw) : rightOf(piece.yaw);
-  const sign = piece.type === 'curveL' ? 1 : -1;
-  const cx = piece.x + side.x * R;
-  const cz = piece.z + side.z * R;
-  const relX0 = piece.x - cx;
-  const relZ0 = piece.z - cz;
-  for (let i = 0; i <= steps; i++) {
-    const t = sign * sweep * (i / steps);
-    const cos = Math.cos(t);
-    const sin = Math.sin(t);
-    pts.push({
-      x: cx + relX0 * cos - relZ0 * sin,
-      z: cz + relX0 * sin + relZ0 * cos,
-      yaw: piece.yaw + t,
-    });
-  }
-  return pts;
+  return sampleTile(piece, Math.max(steps, tileSteps(piece.type, steps)));
 }
 
 function pieceLength(type: TrackPieceType): number {
-  if (type === 'straight') return TRACK.straightLen;
-  return (Math.PI / 2) * TRACK.curveRadius;
+  return tileLength(type);
 }
 
 function midSideSocket(piece: TrackPiece): { x: number; z: number; yaw: number } {
   const samples = samplePiece(piece, 4);
   const mid = samples[Math.floor(samples.length / 2)];
   const out = rightOf(mid.yaw);
-  const half = TRACK.width / 2 + 0.5;
+  const half = pieceHalfWidth(piece.type) + 0.5;
   return {
     x: mid.x + out.x * half,
     z: mid.z + out.z * half,
@@ -197,6 +152,7 @@ function rebuildSockets(world: TrackWorld): void {
 
   // Side sockets
   for (const piece of world.pieces) {
+    if (!TILE_SPECS[piece.type].sideSocket) continue;
     const side = midSideSocket(piece);
     const occupied = world.pieces.some((other) => {
       if (other.id === piece.id) return false;
@@ -259,14 +215,14 @@ export function createStarterTrack(): TrackWorld {
     isLoop: false,
   };
 
-  // Straight line along +Z: 4 straights
+  // Straight line along +Z, centered on the origin
   let x = 0;
-  let z = -TRACK.straightLen * 2;
+  let z = -(TRACK.straightLen * STARTER_STRAIGHTS) / 2;
   let yaw = 0; // +Z
 
   world.startMarker = { x, z, yaw };
 
-  for (let i = 0; i < 4; i++) {
+  for (let i = 0; i < STARTER_STRAIGHTS; i++) {
     const id = `tp-${++world.pieceSeq}`;
     const piece: TrackPiece = { id, type: 'straight', x, z, yaw, placedBy: null, onMainPath: true };
     world.pieces.push(piece);
@@ -290,8 +246,11 @@ export function getSpawnPose(world: TrackWorld, index: number): { x: number; z: 
     return { x: s.x, z: s.z, yaw: s.yaw, wpIndex: 0 };
   }
   // Grid just AFTER the start line
-  const lane = (index % 2 === 0 ? -1 : 1) * (2.0 + Math.floor(index / 2) * 0.1);
-  const forwardDist = 3 + Math.floor(index / 2) * 2.8;
+  // 5 lanes across the wide asphalt, 2 rows (10 fruits)
+  const col = index % SPAWN_GRID.cols;
+  const row = Math.floor(index / SPAWN_GRID.cols);
+  const lane = (col - (SPAWN_GRID.cols - 1) / 2) * SPAWN_GRID.laneGap;
+  const forwardDist = SPAWN_GRID.firstRow + row * SPAWN_GRID.rowGap;
   let wp = wps[0];
   let wpIndex = 0;
   for (let i = 0; i < wps.length; i++) {
@@ -374,7 +333,7 @@ export function crossedFinishLine(
   if (world.isLoop && currentProgress < 0.55) return false;
 
   const fin = world.finishMarker;
-  const f = forward(fin.yaw);
+  const f = forwardVec(fin.yaw);
   // Plane at finish facing along travel: signed distance along forward
   const prevDot = (prevX - fin.x) * f.x + (prevZ - fin.z) * f.z;
   const nowDot = (x - fin.x) * f.x + (z - fin.z) * f.z;
@@ -427,15 +386,7 @@ export function isValidObstaclePlacement(world: TrackWorld, x: number, z: number
 
 /** True if within asphalt half-width of any piece centerline */
 export function isOnAsphalt(world: TrackWorld, x: number, z: number): boolean {
-  const halfW = TRACK.width / 2 + 0.35;
-  let best = Infinity;
-  for (const piece of world.pieces) {
-    for (const s of samplePiece(piece, 10)) {
-      const d = Math.hypot(s.x - x, s.z - z);
-      if (d < best) best = d;
-    }
-  }
-  return best <= halfW;
+  return onAsphalt(world.pieces, x, z, 0.35);
 }
 
 /** Surface height at position (ramps raise the road) — base 0 */

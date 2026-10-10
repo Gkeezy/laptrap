@@ -18,6 +18,7 @@ import {
   DEATH_DEPTH,
   RUN_TURN_RATE_MAX,
   MAP_HALF_SIZE,
+  START_SAFE,
   DEFAULT_TARGET_SCORE,
   MAX_PLAYERS,
   MIN_PLAYERS,
@@ -53,6 +54,8 @@ function genCode(): string {
   for (let i = 0; i < 4; i++) code += alphabet[bytes[i] % alphabet.length];
   return code;
 }
+
+const PLAIN_TILES: TrackPieceType[] = ['straight', 'curveL', 'curveR'];
 
 export class Room {
   code: string;
@@ -664,7 +667,8 @@ export class Room {
       items.push({
         id: `pk-${++this.pickSeq}`,
         kind: isTrack ? 'track' : 'trap',
-        type: isTrack ? rnd(TRACK_PIECE_TYPES) : rnd(OBSTACLE_TYPES),
+        // first track slot is always a plain wide tile so the course stays runnable; the rest mix in specials
+        type: isTrack ? (i === 0 ? rnd(PLAIN_TILES) : rnd(TRACK_PIECE_TYPES)) : rnd(OBSTACLE_TYPES),
         claimedBy: null,
       });
     }
@@ -800,7 +804,9 @@ export class Room {
   /** Traps can go anywhere on the map, with sanity checks. Returns error string or null. */
   private validateTrapSpot(x: number, z: number): string | null {
     if (!Number.isFinite(x) || !Number.isFinite(z)) return 'Invalid position';
-    if (Math.abs(x) > MAP_HALF_SIZE || Math.abs(z) > MAP_HALF_SIZE) return 'Outside the map';
+    // Map = at least +-MAP_HALF_SIZE, and always 80 units around the course as it grows
+    const nearCourse = this.track.pieces.some((pc) => Math.hypot(pc.x - x, pc.z - z) < 80);
+    if (!nearCourse && (Math.abs(x) > MAP_HALF_SIZE || Math.abs(z) > MAP_HALF_SIZE)) return 'Outside the map';
     // Protect START line + spawn grid (grid sits just past start along its heading)
     const s = getMarkers(this.track).start;
     const fx = Math.sin(s.yaw);
@@ -809,7 +815,7 @@ export class Room {
     const dz = z - s.z;
     const along = dx * fx + dz * fz;
     const lat = -dx * fz + dz * fx;
-    if (along > -6 && along < 22 && Math.abs(lat) < 8) return 'Too close to START / spawn area';
+    if (along > -START_SAFE.back && along < START_SAFE.ahead && Math.abs(lat) < START_SAFE.halfWidth) return 'Too close to START / spawn area';
     // No stacking traps on top of each other
     for (const o of this.obstacles) {
       if (Math.hypot(o.x - x, o.z - z) < 3) return 'Too close to another trap';

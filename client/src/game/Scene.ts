@@ -1,5 +1,6 @@
 import * as THREE from 'three';
 import { makeFruit, animateFruit, estimateRemoteSpeed } from './Fruit';
+import { sampleTile, tileSteps, onAsphalt as tileOnAsphalt, TILE_SPECS, leftVec, forwardVec } from '../../../shared/pieces';
 import type {
   CarState,
   CarsUpdate,
@@ -12,13 +13,13 @@ import type {
   TrackSocket,
 } from '../../../shared/types';
 import {
-  TRACK, MAP_HALF_SIZE, DEATH_DEPTH, RUN_TURN_RATE_MAX, RUN_TURN_RATE_MIN, STEER_EASE_IN, STEER_EASE_OUT,
+  TRACK, MAP_HALF_SIZE, START_SAFE, DEATH_DEPTH, RUN_TURN_RATE_MAX, RUN_TURN_RATE_MIN, STEER_EASE_IN, STEER_EASE_OUT,
 } from '../../../shared/types';
 
 /** Grass sits well below the track so a fall off the edge is visible before the death plane */
 const GROUND_Y = -(DEATH_DEPTH + 4);
-/** Client is a hair stricter than the server (0.35) so it starts falling first */
-const ASPHALT_HALF = TRACK.width / 2 + 0.25;
+/** Client lane tolerance is a hair stricter than the server's (0.35) so it starts falling first */
+const ASPHALT_TOL = 0.25;
 
 interface Snapshot {
   x: number;
@@ -53,41 +54,6 @@ function lerpAngle(a: number, b: number, t: number): number {
   return a + d * t;
 }
 
-function samplePieceLocal(piece: TrackPiece, steps = 8): Array<{ x: number; z: number; yaw: number }> {
-  const L = TRACK.straightLen;
-  const R = TRACK.curveRadius;
-  const pts: Array<{ x: number; z: number; yaw: number }> = [];
-  const fwd = (yaw: number) => ({ x: Math.sin(yaw), z: Math.cos(yaw) });
-  const left = (yaw: number) => ({ x: -Math.cos(yaw), z: Math.sin(yaw) });
-  const right = (yaw: number) => ({ x: Math.cos(yaw), z: -Math.sin(yaw) });
-
-  if (piece.type === 'straight') {
-    const f = fwd(piece.yaw);
-    for (let i = 0; i <= steps; i++) {
-      const t = i / steps;
-      pts.push({ x: piece.x + f.x * L * t, z: piece.z + f.z * L * t, yaw: piece.yaw });
-    }
-    return pts;
-  }
-  const side = piece.type === 'curveL' ? left(piece.yaw) : right(piece.yaw);
-  const sign = piece.type === 'curveL' ? 1 : -1;
-  const cx = piece.x + side.x * R;
-  const cz = piece.z + side.z * R;
-  const relX0 = piece.x - cx;
-  const relZ0 = piece.z - cz;
-  const sweep = Math.PI / 2;
-  for (let i = 0; i <= steps; i++) {
-    const t = sign * sweep * (i / steps);
-    const cos = Math.cos(t);
-    const sin = Math.sin(t);
-    pts.push({
-      x: cx + relX0 * cos - relZ0 * sin,
-      z: cz + relX0 * sin + relZ0 * cos,
-      yaw: piece.yaw + t,
-    });
-  }
-  return pts;
-}
 
 export class GameScene {
   renderer: THREE.WebGLRenderer;
@@ -129,12 +95,12 @@ export class GameScene {
     this.renderer.setSize(canvas.clientWidth || innerWidth, canvas.clientHeight || innerHeight, false);
     this.renderer.setClearColor(0x87b5e0);
     this.scene = new THREE.Scene();
-    this.scene.fog = new THREE.Fog(0x87b5e0, 90, 200);
-    this.camera = new THREE.PerspectiveCamera(55, 1, 0.1, 400);
+    this.scene.fog = new THREE.Fog(0x87b5e0, 170, 560);
+    this.camera = new THREE.PerspectiveCamera(55, 1, 0.1, 900);
     this.camera.position.set(0, 40, 50);
 
     const ground = new THREE.Mesh(
-      new THREE.PlaneGeometry(500, 500),
+      new THREE.PlaneGeometry(1400, 1400),
       new THREE.MeshLambertMaterial({ color: 0x3d8c40 }),
     );
     ground.rotation.x = -Math.PI / 2;
@@ -270,26 +236,44 @@ export class GameScene {
 
   private makePieceMesh(piece: TrackPiece): THREE.Object3D {
     const g = new THREE.Group();
-    const samples = samplePieceLocal(piece, 10);
-    const halfW = TRACK.width / 2;
-    const mat = new THREE.MeshLambertMaterial({ color: piece.onMainPath ? 0x2a2e35 : 0x3a4555 });
-        for (let i = 0; i < samples.length - 1; i++) {
+    const samples = sampleTile(piece, tileSteps(piece.type, 10));
+    const spec = TILE_SPECS[piece.type];
+    const color = piece.type === 'plank' ? 0x8b5a2b : piece.onMainPath ? 0x2a2e35 : 0x3a4555;
+    const mat = new THREE.MeshLambertMaterial({ color });
+    const dashMat = new THREE.MeshBasicMaterial({ color: 0xf5d76e });
+    const warnMat = new THREE.MeshBasicMaterial({ color: 0xe23b2e });
+    let prevHadLanes = true;
+    for (let i = 0; i < samples.length - 1; i++) {
       const a = samples[i];
       const b = samples[i + 1];
       const dx = b.x - a.x;
       const dz = b.z - a.z;
       const len = Math.hypot(dx, dz) || 0.01;
       const yaw = Math.atan2(dx, dz);
-      const seg = new THREE.Mesh(new THREE.BoxGeometry(TRACK.width, 0.16, len + 0.05), mat);
-      seg.position.set((a.x + b.x) / 2, 0.08, (a.z + b.z) / 2);
-      seg.rotation.y = yaw;
-      g.add(seg);
-      if (i % 2 === 0) {
-        const dash = new THREE.Mesh(
-          new THREE.BoxGeometry(0.25, 0.05, Math.min(1.2, len * 0.6)),
-          new THREE.MeshBasicMaterial({ color: 0xf5d76e }),
-        );
-        dash.position.set((a.x + b.x) / 2, 0.18, (a.z + b.z) / 2);
+      const sMid = (a.s + b.s) / 2;
+      const lanes = spec.lanes(sMid);
+      const l = leftVec(yaw);
+      const mx = (a.x + b.x) / 2;
+      const mz = (a.z + b.z) / 2;
+      for (const [lo, hi] of lanes) {
+        const off = (lo + hi) / 2;
+        const seg = new THREE.Mesh(new THREE.BoxGeometry(hi - lo, 0.16, len + 0.06), mat);
+        seg.position.set(mx + l.x * off, 0.08, mz + l.z * off);
+        seg.rotation.y = yaw;
+        g.add(seg);
+      }
+      // red warning bars at the edges of holes (jump gap)
+      if (lanes.length === 0 && prevHadLanes || lanes.length > 0 && !prevHadLanes) {
+        const bar = new THREE.Mesh(new THREE.BoxGeometry(TRACK.width, 0.2, 0.5), warnMat);
+        bar.position.set(a.x, 0.12, a.z);
+        bar.rotation.y = yaw;
+        g.add(bar);
+      }
+      prevHadLanes = lanes.length > 0;
+      const centerLane = lanes.some(([lo, hi]) => lo < -0.5 && hi > 0.5);
+      if (centerLane && piece.type !== 'plank' && i % 3 === 0) {
+        const dash = new THREE.Mesh(new THREE.BoxGeometry(0.25, 0.05, Math.min(1.4, len * 0.9)), dashMat);
+        dash.position.set(mx, 0.18, mz);
         dash.rotation.y = yaw;
         g.add(dash);
       }
@@ -661,7 +645,7 @@ export class GameScene {
     }
 
     // Is there anything under us? Asphalt or a ramp, and only if we haven't dropped below the surface.
-    const onAsphalt = this.distanceOffAsphalt(cr.localX, cr.localZ) <= ASPHALT_HALF;
+    const onAsphalt = tileOnAsphalt(this.pieces, cr.localX, cr.localZ, ASPHALT_TOL);
     const hasGround = (onAsphalt || onRamp) && cr.localY > -0.6;
     if (!hasGround) {
       // Ran off the edge (or dropped below it): real fall, no steering, keep some momentum
@@ -697,7 +681,7 @@ export class GameScene {
 
   /** Traps placed off the asphalt stand on a stone post down to the grass far below. */
   private updateTrapPillar(mesh: THREE.Object3D, x: number, z: number): void {
-    const off = this.distanceOffAsphalt(x, z) > ASPHALT_HALF;
+    const off = !tileOnAsphalt(this.pieces, x, z, ASPHALT_TOL);
     let pillar = mesh.getObjectByName('pillar');
     if (off && !pillar) {
       const h = -GROUND_Y;
@@ -712,16 +696,7 @@ export class GameScene {
     if (pillar) pillar.visible = off;
   }
 
-  private distanceOffAsphalt(x: number, z: number): number {
-    let best = Infinity;
-    for (const piece of this.pieces) {
-      for (const s of samplePieceLocal(piece, 8)) {
-        const d = Math.hypot(s.x - x, s.z - z);
-        if (d < best) best = d;
-      }
-    }
-    return best;
-  }
+
 
   getLocalPose(): {
     x: number; y: number; z: number; yaw: number; speed: number; boost: number; vy: number; airborne: boolean;
@@ -776,7 +751,8 @@ export class GameScene {
 
   /** Client-side mirror of server trap rules, for ghost tint only (server decides). */
   private trapSpotOk(x: number, z: number): boolean {
-    if (Math.abs(x) > MAP_HALF_SIZE || Math.abs(z) > MAP_HALF_SIZE) return false;
+    const nearCourse = this.pieces.some((pc) => Math.hypot(pc.x - x, pc.z - z) < 80);
+    if (!nearCourse && (Math.abs(x) > MAP_HALF_SIZE || Math.abs(z) > MAP_HALF_SIZE)) return false;
     const s = this.markersCache?.start;
     if (s) {
       const fx = Math.sin(s.yaw);
@@ -785,7 +761,7 @@ export class GameScene {
       const dz = z - s.z;
       const along = dx * fx + dz * fz;
       const lat = -dx * fz + dz * fx;
-      if (along > -6 && along < 22 && Math.abs(lat) < 8) return false;
+      if (along > -START_SAFE.back && along < START_SAFE.ahead && Math.abs(lat) < START_SAFE.halfWidth) return false;
     }
     for (const m of this.obstacleMeshes.values()) {
       if (Math.hypot(m.position.x - x, m.position.z - z) < 3) return false;
@@ -851,11 +827,7 @@ export class GameScene {
     }
     for (const [id, mesh] of this.socketMeshes) {
       const selected = id === this.selectedSocketId;
-      (mesh as THREE.Mesh).material = new THREE.MeshBasicMaterial({
-        color: selected ? 0xff5a36 : 0x3ecf8e,
-        transparent: true,
-        opacity: selected ? 0.9 : 0.65,
-      });
+      (mesh as THREE.Mesh).material = selected ? this.sockMatSel : this.sockMatIdle;
     }
     this.updateGhostVisibility();
     return { kind: best ? 'socket' : 'ground', socketId: this.selectedSocketId };
@@ -885,11 +857,7 @@ export class GameScene {
     }
     for (const [id, mesh] of this.socketMeshes) {
       const selected = id === this.selectedSocketId;
-      (mesh as THREE.Mesh).material = new THREE.MeshBasicMaterial({
-        color: selected ? 0xff5a36 : 0x3ecf8e,
-        transparent: true,
-        opacity: selected ? 0.95 : 0.55,
-      });
+      (mesh as THREE.Mesh).material = selected ? this.sockMatSel : this.sockMatIdle;
       mesh.visible = this.placing;
     }
     this.updateGhostVisibility();
@@ -973,24 +941,99 @@ export class GameScene {
     }
   }
 
-  private placementOverview(): { x: number; z: number; h: number } {
+  // ---------- Build-phase camera (PICK + PLACE) ----------
+  private buildView = false;
+  private sockMatIdle = new THREE.MeshBasicMaterial({ color: 0x3ecf8e, transparent: true, opacity: 0.6 });
+  private sockMatSel = new THREE.MeshBasicMaterial({ color: 0xff5a36, transparent: true, opacity: 0.95 });
+  /** Orbit camera: look-at point (x,z), distance, heading yaw (camera looks along forward(yaw)), pitch */
+  private bv = { x: 0, z: 0, dist: 90, yaw: 0, pitch: 0.95 };
+  private bvBounds = { minX: -60, maxX: 60, minZ: -60, maxZ: 60 };
+
+  /** Enter/leave the free build camera. Entering frames the course with FINISH ahead. */
+  setBuildView(active: boolean): void {
+    if (active && !this.buildView) this.resetBuildView();
+    this.buildView = active;
+  }
+
+  isBuildView(): boolean {
+    return this.buildView;
+  }
+
+  /** Default view: from behind/above START looking down the course toward FINISH, whole course framed. */
+  resetBuildView(): void {
+    const m = this.markersCache;
     let minX = Infinity, maxX = -Infinity, minZ = Infinity, maxZ = -Infinity;
     for (const pc of this.pieces) {
-      minX = Math.min(minX, pc.x); maxX = Math.max(maxX, pc.x);
-      minZ = Math.min(minZ, pc.z); maxZ = Math.max(maxZ, pc.z);
+      for (const sp of sampleTile(pc, 6)) {
+        minX = Math.min(minX, sp.x); maxX = Math.max(maxX, sp.x);
+        minZ = Math.min(minZ, sp.z); maxZ = Math.max(maxZ, sp.z);
+      }
     }
-    if (!Number.isFinite(minX)) return { x: 0, z: 0, h: 60 };
-    const span = Math.max(maxX - minX, maxZ - minZ) + 40;
-    return { x: (minX + maxX) / 2, z: (minZ + maxZ) / 2, h: Math.max(60, span * 1.05) };
+    if (!Number.isFinite(minX)) { minX = -40; maxX = 40; minZ = -40; maxZ = 40; }
+    const pad = TRACK.width;
+    minX -= pad; maxX += pad; minZ -= pad; maxZ += pad;
+    this.bvBounds = { minX: minX - 60, maxX: maxX + 60, minZ: minZ - 60, maxZ: maxZ + 60 };
+    let yaw = 0;
+    if (m) {
+      const dx = m.finish.x - m.start.x;
+      const dz = m.finish.z - m.start.z;
+      yaw = Math.hypot(dx, dz) > 10 && !m.isLoop ? Math.atan2(dx, dz) : m.start.yaw;
+    }
+    // look-at: course center, nudged toward START so the course runs from bottom (START) to top (FINISH)
+    const cx = (minX + maxX) / 2;
+    const cz = (minZ + maxZ) / 2;
+    const extent = Math.max(maxX - minX, maxZ - minZ) / 2;
+    const dist = Math.min(280, Math.max(55, extent * 2.1 + 15));
+    this.bv = { x: cx, z: cz, dist, yaw, pitch: 0.95 };
+  }
+
+  /** Grab-style pan by screen pixels (drag right = content moves right). */
+  panBuildViewPixels(dxPx: number, dyPx: number): void {
+    const h = this.canvas.clientHeight || innerHeight;
+    const worldPerPx = (2 * this.bv.dist * Math.tan((this.camera.fov * Math.PI) / 360)) / h;
+    const f = forwardVec(this.bv.yaw);
+    const l = leftVec(this.bv.yaw); // screen-left
+    // drag right -> camera moves screen-left; drag down -> camera moves forward (scaled for pitch)
+    const fwdScale = 1 / Math.max(0.5, Math.sin(this.bv.pitch));
+    this.bv.x += l.x * dxPx * worldPerPx + f.x * dyPx * worldPerPx * fwdScale;
+    this.bv.z += l.z * dxPx * worldPerPx + f.z * dyPx * worldPerPx * fwdScale;
+    this.clampBuildView();
+  }
+
+  /** Pan in screen directions: right>0 moves view right, up>0 moves view forward (toward top of screen). */
+  panBuildView(right: number, up: number): void {
+    const f = forwardVec(this.bv.yaw);
+    const l = leftVec(this.bv.yaw);
+    const k = this.bv.dist / 90;
+    this.bv.x += (-l.x * right + f.x * up) * k;
+    this.bv.z += (-l.z * right + f.z * up) * k;
+    this.clampBuildView();
+  }
+
+  zoomBuildView(factor: number): void {
+    this.bv.dist = Math.min(280, Math.max(22, this.bv.dist * factor));
+  }
+
+  rotateBuildView(dYaw: number, dPitch = 0): void {
+    this.bv.yaw += dYaw;
+    this.bv.pitch = Math.min(1.45, Math.max(0.5, this.bv.pitch + dPitch));
+  }
+
+  private clampBuildView(): void {
+    const b = this.bvBounds;
+    // keep the look-at point within the course bounds (+60 margin), however far the course has grown
+    this.bv.x = Math.min(b.maxX, Math.max(b.minX, this.bv.x));
+    this.bv.z = Math.min(b.maxZ, Math.max(b.minZ, this.bv.z));
   }
 
   private updateCamera(_now: number): void {
-    if (this.placing) {
-      // Fixed overview of the whole course while placing. (It used to chase the ghost, which panned the
-      // view as you moved the mouse, so the spot under the cursor kept sliding away.)
-      const ov = this.placementOverview();
-      this.camTarget.lerp(new THREE.Vector3(ov.x, ov.h, ov.z + ov.h * 0.35), 0.08);
-      this.camLook.lerp(new THREE.Vector3(ov.x, 0, ov.z), 0.08);
+    if (this.buildView) {
+      // Free build camera (never follows the mouse/ghost, so the spot under the cursor stays put)
+      const f = forwardVec(this.bv.yaw);
+      const horiz = Math.cos(this.bv.pitch) * this.bv.dist;
+      const desired = new THREE.Vector3(this.bv.x - f.x * horiz, Math.sin(this.bv.pitch) * this.bv.dist, this.bv.z - f.z * horiz);
+      this.camTarget.lerp(desired, 0.3);
+      this.camLook.lerp(new THREE.Vector3(this.bv.x, 0, this.bv.z), 0.3);
     } else {
       const cr = this.cars.get(this.localId);
       if (cr && cr.mesh.visible) {
