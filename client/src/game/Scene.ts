@@ -1,4 +1,5 @@
 import * as THREE from 'three';
+import { makeFruit, animateFruit, estimateRemoteSpeed } from './Fruit';
 import type {
   CarState,
   CarsUpdate,
@@ -10,7 +11,7 @@ import type {
   TrackPiece,
   TrackSocket,
 } from '../../../shared/types';
-import { TRACK } from '../../../shared/types';
+import { TRACK, MAP_HALF_SIZE } from '../../../shared/types';
 
 interface Snapshot {
   x: number;
@@ -28,6 +29,7 @@ interface CarRender {
   localYaw: number;
   localSpeed: number;
   localBoost: number;
+  padBoost: number;
   localVy: number;
   airborne: boolean;
   spinning: number;
@@ -91,6 +93,13 @@ export class GameScene {
   private startGate: THREE.Group | null = null;
   private finishGate: THREE.Group | null = null;
   private animId = 0;
+  private jumpHeld = false;
+  private lastFrame = performance.now();
+  private ghostType: Obstacle['type'] | null = null;
+  private ghostPreview: THREE.Object3D | null = null;
+  private ghostRing: THREE.Mesh | null = null;
+  private markersCache: RaceMarkers | null = null;
+  ghostValid = true;
   private localId = '';
   private players = new Map<string, PlayerPublic>();
   canvas: HTMLCanvasElement;
@@ -141,30 +150,6 @@ export class GameScene {
     this.renderer.setSize(w, h, false);
     this.camera.aspect = w / h;
     this.camera.updateProjectionMatrix();
-  }
-
-  private makeCar(color: string): THREE.Group {
-    const g = new THREE.Group();
-    const body = new THREE.Mesh(
-      new THREE.BoxGeometry(1.6, 0.55, 2.8),
-      new THREE.MeshLambertMaterial({ color }),
-    );
-    body.position.y = 0.45;
-    g.add(body);
-    const cabin = new THREE.Mesh(
-      new THREE.BoxGeometry(1.2, 0.4, 1.2),
-      new THREE.MeshLambertMaterial({ color: 0x222222 }),
-    );
-    cabin.position.set(0, 0.85, -0.15);
-    g.add(cabin);
-    const wheelMat = new THREE.MeshLambertMaterial({ color: 0x111111 });
-    for (const [x, z] of [[-0.85, 0.9], [0.85, 0.9], [-0.85, -0.9], [0.85, -0.9]] as const) {
-      const w = new THREE.Mesh(new THREE.CylinderGeometry(0.35, 0.35, 0.35, 10), wheelMat);
-      w.rotation.z = Math.PI / 2;
-      w.position.set(x, 0.35, z);
-      g.add(w);
-    }
-    return g;
   }
 
   private makeObstacle(type: Obstacle['type']): THREE.Object3D {
@@ -361,6 +346,7 @@ export class GameScene {
   }
 
   syncMarkers(markers: RaceMarkers): void {
+    this.markersCache = markers;
     if (!this.startGate) {
       this.startGate = this.makeGate('START', 0x2ecc71);
       this.scene.add(this.startGate);
@@ -530,14 +516,15 @@ export class GameScene {
         while (cr.buffer.length > 40) cr.buffer.shift();
         // store y on mesh directly via userData
         cr.mesh.userData.y = car.y || 0;
+        cr.mesh.userData.airborne = !!car.airborne;
       }
     }
   }
 
   private ensureCar(car: CarState, now: number): void {
     if (this.cars.has(car.id)) return;
-    const color = this.players.get(car.id)?.color || '#ffffff';
-    const mesh = this.makeCar(color);
+    const pl = this.players.get(car.id);
+    const mesh = makeFruit(pl?.fruit || 'apple', pl?.color || '#ffffff');
     this.scene.add(mesh);
     this.cars.set(car.id, {
       mesh,
@@ -548,6 +535,7 @@ export class GameScene {
       localYaw: car.yaw,
       localSpeed: 0,
       localBoost: 100,
+      padBoost: 0,
       localVy: 0,
       airborne: false,
       spinning: 0,
@@ -585,30 +573,63 @@ export class GameScene {
       }
     }
 
+    // Mirror utility trap effects locally (server applies the same rules)
+    if (cr.padBoost > 0) cr.padBoost -= dt;
+    for (const ob of obstacles) {
+      if (ob.spent) continue;
+      const od = Math.hypot(cr.localX - ob.x, cr.localZ - ob.z);
+      const highUp = cr.airborne && cr.localY > 0.6;
+      switch (ob.type) {
+        case 'barrier':
+          if (od < 2.2 && !highUp) {
+            const nx = (cr.localX - ob.x) / (od || 1);
+            const nz = (cr.localZ - ob.z) / (od || 1);
+            cr.localX = ob.x + nx * 2.2;
+            cr.localZ = ob.z + nz * 2.2;
+            cr.localSpeed *= -0.2;
+          }
+          break;
+        case 'ice':
+          if (od < 2.8 && !highUp) cr.icy = Math.max(cr.icy, 1.0);
+          break;
+        case 'boost':
+          if (od < 2.5 && !highUp) {
+            cr.padBoost = 1.2;
+            cr.localSpeed = Math.max(cr.localSpeed, 40);
+          }
+          break;
+        case 'oil':
+          if (od < 2.4 && !highUp && cr.spinning <= 0) cr.spinning = 0.7;
+          break;
+      }
+    }
+
     if (cr.spinning > 0) {
       cr.spinning -= dt;
       cr.localYaw += 5 * dt;
       cr.localSpeed *= Math.max(0, 1 - 1.2 * dt);
     } else if (!cr.airborne) {
-      const turnRate = 2.5 + Math.min(Math.abs(cr.localSpeed) * 0.05, 1.1);
+      // Running: snappy turning (even at low speed), quick accel, quick stop
+      const turnRate = 4.2 - Math.min(Math.abs(cr.localSpeed) * 0.03, 1.0);
       if (input.left) cr.localYaw += turnRate * dt;
       if (input.right) cr.localYaw -= turnRate * dt;
-      if (input.forward) cr.localSpeed += 30 * dt;
-      if (input.back) cr.localSpeed -= 40 * dt;
-      let boosting = false;
-      if (input.boost && cr.localBoost > 0 && cr.localSpeed > 4) {
-        cr.localBoost = Math.max(0, cr.localBoost - 30 * dt);
-        cr.localSpeed += 24 * dt;
-        boosting = true;
+      if (input.forward) cr.localSpeed += 55 * dt;
+      if (input.back) cr.localSpeed -= 55 * dt;
+      // Jump (Space): edge-triggered hop while grounded
+      if (input.jump && !this.jumpHeld && !cr.airborne) {
+        cr.localVy = 11;
+        cr.airborne = true;
+        cr.localY += 0.05;
       }
-      if (!boosting) cr.localBoost = Math.min(100, cr.localBoost + 20 * dt);
       if (cr.icy > 0) {
         cr.icy -= dt;
         cr.localYaw += Math.sin(performance.now() / 140) * 0.45 * dt;
+        cr.localSpeed *= Math.max(0, 1 - 0.2 * dt); // slippery: coast
+      } else {
+        cr.localSpeed *= Math.max(0, 1 - 1.2 * dt);
+        if (!input.forward && !input.back) cr.localSpeed *= Math.max(0, 1 - 6 * dt);
       }
-      cr.localSpeed *= Math.max(0, 1 - 1.0 * dt);
-      if (!input.forward && !input.back && !boosting) cr.localSpeed *= Math.max(0, 1 - 2.5 * dt);
-      cr.localSpeed = Math.max(-12, Math.min(50 + (boosting ? 16 : 0), cr.localSpeed));
+      cr.localSpeed = Math.max(-10, Math.min(cr.padBoost > 0 ? 44 : 30, cr.localSpeed));
     }
 
     cr.localX += Math.sin(cr.localYaw) * cr.localSpeed * dt;
@@ -637,6 +658,8 @@ export class GameScene {
       cr.localVy = 0;
       cr.airborne = false;
     }
+
+    this.jumpHeld = input.jump;
 
     // Soft stay near asphalt while grounded — if far, signal fall-off
     if (!cr.airborne && cr.localY < 0.5) {
@@ -682,6 +705,53 @@ export class GameScene {
     this.updateGhostVisibility();
   }
 
+  /** Trap type to preview under the cursor (null = track mode / ring only). */
+  setGhostType(type: Obstacle['type'] | null): void {
+    if (type === this.ghostType) return;
+    this.ghostType = type;
+    if (this.ghostPreview && this.placeMarker) this.placeMarker.remove(this.ghostPreview);
+    this.ghostPreview = null;
+    if (type) {
+      const prev = this.makeObstacle(type);
+      prev.traverse((o) => {
+        const m = o as THREE.Mesh;
+        if (m.material) {
+          const mat = (m.material as THREE.Material).clone() as THREE.MeshLambertMaterial;
+          mat.transparent = true;
+          mat.opacity = 0.55;
+          mat.depthWrite = false;
+          m.material = mat;
+        }
+      });
+      this.ghostPreview = prev;
+    }
+    this.updateGhostVisibility();
+  }
+
+  rotateGhost(delta: number): void {
+    this.ghostPos.yaw += delta;
+    this.updateGhostVisibility();
+  }
+
+  /** Client-side mirror of server trap rules, for ghost tint only (server decides). */
+  private trapSpotOk(x: number, z: number): boolean {
+    if (Math.abs(x) > MAP_HALF_SIZE || Math.abs(z) > MAP_HALF_SIZE) return false;
+    const s = this.markersCache?.start;
+    if (s) {
+      const fx = Math.sin(s.yaw);
+      const fz = Math.cos(s.yaw);
+      const dx = x - s.x;
+      const dz = z - s.z;
+      const along = dx * fx + dz * fz;
+      const lat = -dx * fz + dz * fx;
+      if (along > -6 && along < 22 && Math.abs(lat) < 8) return false;
+    }
+    for (const m of this.obstacleMeshes.values()) {
+      if (Math.hypot(m.position.x - x, m.position.z - z) < 3) return false;
+    }
+    return true;
+  }
+
   private updateGhostVisibility(): void {
     if (this.placing) {
       if (!this.placeMarker) {
@@ -693,8 +763,17 @@ export class GameScene {
         ring.rotation.x = -Math.PI / 2;
         ring.position.y = 0.35;
         g.add(ring);
+        this.ghostRing = ring;
         this.placeMarker = g;
         this.scene.add(g);
+      }
+      if (this.ghostPreview && this.ghostPreview.parent !== this.placeMarker) this.placeMarker.add(this.ghostPreview);
+      if (this.ghostPreview) this.ghostPreview.rotation.y = this.ghostPos.yaw;
+      this.ghostValid = this.ghostType ? this.trapSpotOk(this.ghostPos.x, this.ghostPos.z) : true;
+      if (this.ghostRing) {
+        (this.ghostRing.material as THREE.MeshBasicMaterial).color.set(
+          this.ghostType ? (this.ghostValid ? 0x3ecf8e : 0xff3030) : 0xff5a36,
+        );
       }
       this.placeMarker.visible = true;
       this.placeMarker.position.set(this.ghostPos.x, 0, this.ghostPos.z);
@@ -808,6 +887,8 @@ export class GameScene {
 
   private renderCars(now: number): void {
     const renderTime = now - this.renderDelayMs;
+    const dt = Math.min(0.1, Math.max(0.001, (now - this.lastFrame) / 1000));
+    this.lastFrame = now;
     for (const [id, cr] of this.cars) {
       if (!cr.mesh.visible) continue;
       if (cr.eliminated) {
@@ -817,26 +898,31 @@ export class GameScene {
       if (id === this.localId) {
         cr.mesh.position.set(cr.localX, cr.localY, cr.localZ);
         cr.mesh.rotation.y = cr.localYaw;
+        animateFruit(cr.mesh, this.racing ? cr.localSpeed : 0, cr.airborne, dt, now);
         continue;
       }
       // Interpolate from buffer
       const buf = cr.buffer;
       if (buf.length === 0) continue;
-      if (buf.length === 1) {
-        cr.mesh.position.set(buf[0].x, 0, buf[0].z);
-        cr.mesh.rotation.y = buf[0].yaw;
-        continue;
-      }
-      // Find surrounding snapshots
-      let i = 0;
-      while (i < buf.length - 1 && buf[i + 1].t < renderTime) i++;
-      const a = buf[Math.max(0, i)];
-      const b = buf[Math.min(buf.length - 1, i + 1)];
-      const span = Math.max(1, b.t - a.t);
-      const t = Math.min(1, Math.max(0, (renderTime - a.t) / span));
       const yy = (cr.mesh.userData.y as number) || 0;
-      cr.mesh.position.set(a.x + (b.x - a.x) * t, yy, a.z + (b.z - a.z) * t);
-      cr.mesh.rotation.y = lerpAngle(a.yaw, b.yaw, t);
+      if (buf.length === 1) {
+        cr.mesh.position.set(buf[0].x, yy, buf[0].z);
+        cr.mesh.rotation.y = buf[0].yaw;
+      } else {
+        let i = 0;
+        while (i < buf.length - 1 && buf[i + 1].t < renderTime) i++;
+        const a = buf[Math.max(0, i)];
+        const b = buf[Math.min(buf.length - 1, i + 1)];
+        const span = Math.max(1, b.t - a.t);
+        const t = Math.min(1, Math.max(0, (renderTime - a.t) / span));
+        // smooth y too so remote hops don't step
+        const curY = cr.mesh.position.y;
+        cr.mesh.position.set(a.x + (b.x - a.x) * t, curY + (yy - curY) * Math.min(1, dt * 12), a.z + (b.z - a.z) * t);
+        cr.mesh.rotation.y = lerpAngle(a.yaw, b.yaw, t);
+      }
+      const spd = estimateRemoteSpeed(cr.mesh, dt);
+      const air = !!cr.mesh.userData.airborne || cr.mesh.position.y > 0.4;
+      animateFruit(cr.mesh, spd, air, dt, now);
     }
   }
 

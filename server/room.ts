@@ -11,7 +11,8 @@ import {
   CarsUpdate,
   InputState,
   PoseUpdate,
-  CAR_COLORS,
+  FRUITS,
+  MAP_HALF_SIZE,
   DEFAULT_TARGET_SCORE,
   MAX_PLAYERS,
   MIN_PLAYERS,
@@ -26,7 +27,6 @@ import {
   getMarkers,
   getSpawnPose,
   isOnAsphalt,
-  isValidObstaclePlacement,
   placeTrackPiece,
   surfaceHeightAt,
   worldToProgress,
@@ -107,10 +107,13 @@ export class Room {
     if ([...this.players.values()].some((p) => p.name.toLowerCase() === name.toLowerCase())) {
       return { ok: false, error: 'Name taken' };
     }
+    const used = new Set([...this.players.values()].map((pl) => pl.fruit));
+    const fruit = FRUITS.find((f) => !used.has(f.type)) ?? FRUITS[this.players.size % FRUITS.length];
     this.players.set(id, {
       id,
-      name: name.slice(0, 16) || 'Racer',
-      color: CAR_COLORS[this.players.size % CAR_COLORS.length],
+      name: name.slice(0, 16) || 'Runner',
+      color: fruit.color,
+      fruit: fruit.type,
       score: 0,
       ready: false,
       connected: true,
@@ -229,7 +232,7 @@ export class Room {
       this.prevWp.set(p.id, spawn.wpIndex);
       this.prevPos.set(p.id, { x: spawn.x, z: spawn.z });
       this.passedMid.set(p.id, false);
-      this.inputs.set(p.id, { forward: false, back: false, left: false, right: false, boost: false });
+      this.inputs.set(p.id, { forward: false, back: false, left: false, right: false, jump: false });
     }
 
     this.broadcast();
@@ -264,7 +267,7 @@ export class Room {
       back: !!input.back,
       left: !!input.left,
       right: !!input.right,
-      boost: !!input.boost,
+      jump: !!input.jump,
     });
   }
 
@@ -279,7 +282,7 @@ export class Room {
       back: !!pose.input?.back,
       left: !!pose.input?.left,
       right: !!pose.input?.right,
-      boost: !!pose.input?.boost,
+      jump: !!pose.input?.jump,
     });
 
     const dx = pose.x - car.x;
@@ -604,8 +607,9 @@ export class Room {
     if (!p?.connected) return { ok: false, error: 'Not in room' };
     if (p.hasPlaced) return { ok: false, error: 'Already placed this round (one item only)' };
     if (!OBSTACLE_TYPES.includes(type)) return { ok: false, error: 'Invalid type' };
-    if (!isValidObstaclePlacement(this.track, x, z)) return { ok: false, error: 'Must place on track' };
-    if (this.obstacles.length >= 40) return { ok: false, error: 'Too many obstacles' };
+    const bad = this.validateTrapSpot(x, z);
+    if (bad) return { ok: false, error: bad };
+    if (this.obstacles.length >= 80) return { ok: false, error: 'Too many traps on the map' };
 
     this.obstacles.push({
       id: `ob-${++this.obstacleSeq}`,
@@ -617,6 +621,26 @@ export class Room {
     });
     this.markPlaced(id);
     return { ok: true };
+  }
+
+  /** Traps can go anywhere on the map, with sanity checks. Returns error string or null. */
+  private validateTrapSpot(x: number, z: number): string | null {
+    if (!Number.isFinite(x) || !Number.isFinite(z)) return 'Invalid position';
+    if (Math.abs(x) > MAP_HALF_SIZE || Math.abs(z) > MAP_HALF_SIZE) return 'Outside the map';
+    // Protect START line + spawn grid (grid sits just past start along its heading)
+    const s = getMarkers(this.track).start;
+    const fx = Math.sin(s.yaw);
+    const fz = Math.cos(s.yaw);
+    const dx = x - s.x;
+    const dz = z - s.z;
+    const along = dx * fx + dz * fz;
+    const lat = -dx * fz + dz * fx;
+    if (along > -6 && along < 22 && Math.abs(lat) < 8) return 'Too close to START / spawn area';
+    // No stacking traps on top of each other
+    for (const o of this.obstacles) {
+      if (Math.hypot(o.x - x, o.z - z) < 3) return 'Too close to another trap';
+    }
+    return null;
   }
 
   placeTrack(id: string, type: TrackPieceType, socketId: string): { ok: boolean; error?: string } {

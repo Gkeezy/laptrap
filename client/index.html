@@ -3,18 +3,19 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
-    <title>Laptrap — Race, Trap, Repeat</title>
-    <meta name="description" content="Browser multiplayer trap-racing. Race, place traps, build the track." />
-    <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🏎️</text></svg>" />
+    <title>Laptrap — Run, Trap, Repeat</title>
+    <meta name="description" content="Browser multiplayer fruit foot-race. Run, place traps anywhere, build the track." />
+    <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🍓</text></svg>" />
   </head>
   <body>
     <div id="app">
       <div id="menu" class="panel-screen">
         <div class="menu-card">
           <h1>LAPTRAP</h1>
-          <p class="tagline">Race · Trap · Build · Race again</p>
+          <p class="tagline">Run · Trap · Build · Run again</p>
+          <p class="fruit-row">🍎 🍌 🍊 🍓 🍉 🍍 🍇 🍋 🍒 🍐</p>
           <label>Your name
-            <input id="player-name" maxlength="16" placeholder="Racer" autocomplete="off" />
+            <input id="player-name" maxlength="16" placeholder="Runner" autocomplete="off" />
           </label>
           <div class="menu-actions">
             <button id="btn-create" class="btn primary">Create Room</button>
@@ -24,7 +25,7 @@
             </div>
           </div>
           <p id="menu-error" class="error"></p>
-          <p class="hint">Share the room link so friends can jump in. Fall off the track = out!</p>
+          <p class="hint">You’re a running fruit! WASD/arrows to run, Space to jump. Run off the track = out!</p>
         </div>
       </div>
 
@@ -38,7 +39,7 @@
           <ul id="player-list"></ul>
           <div class="menu-actions">
             <button id="btn-ready" class="btn">Ready</button>
-            <button id="btn-start" class="btn primary hidden">Start Race</button>
+            <button id="btn-start" class="btn primary hidden">Start Run</button>
             <button id="btn-leave" class="btn danger">Leave</button>
           </div>
           <p id="lobby-msg" class="hint"></p>
@@ -84,7 +85,7 @@
             <button data-key="right">▶</button>
           </div>
           <div class="mc-right">
-            <button data-key="boost">BOOST</button>
+            <button data-key="jump">JUMP</button>
             <button data-key="forward">▲</button>
             <button data-key="back">▼</button>
           </div>

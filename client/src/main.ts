@@ -8,7 +8,10 @@ import {
   TRACK_PIECE_TYPES,
   TRACK_PIECE_LABELS,
   TRACK_PIECE_ICONS,
+  FRUITS,
 } from '../../shared/types';
+
+const fruitOf = (f?: string) => FRUITS.find((x) => x.type === f);
 import * as net from './network/socket';
 import { GameScene } from './game/Scene';
 
@@ -60,7 +63,7 @@ let lastTick = performance.now();
 let poseAccum = 0;
 
 const keys: InputState = {
-  forward: false, back: false, left: false, right: false, boost: false,
+  forward: false, back: false, left: false, right: false, jump: false,
 };
 
 nameInput.value = localStorage.getItem('laptrap-name') || '';
@@ -98,7 +101,10 @@ async function onMapClick(e: MouseEvent): Promise<void> {
 
   const hit = scene.screenToTrack(e.clientX, e.clientY);
   if (!hit) return;
-  const pick = scene.setGhostFromClick(hit.x, hit.z);
+  // Traps: exact cursor spot anywhere on the map. Track: snap to sockets.
+  const pick = buildMode === 'track'
+    ? scene.setGhostFromClick(hit.x, hit.z)
+    : (scene.updateGhostCursor(hit.x, hit.z, false), { kind: 'ground' as const, socketId: null });
 
   if (!itemSelected) {
     flash('Select an item from the toolbar first');
@@ -118,6 +124,10 @@ async function onMapClick(e: MouseEvent): Promise<void> {
     return;
   }
 
+  if (!scene.ghostValid) {
+    flash('Can’t place there (START/spawn zone, map edge, or on another trap)');
+    return;
+  }
   const res = await net.placeObstacle(selectedObstacle, scene.ghostPos.x, scene.ghostPos.z, scene.ghostPos.yaw);
   if (!res.ok) flash(res.error || 'Place failed');
 }
@@ -143,7 +153,7 @@ async function doCreate(): Promise<void> {
 
 async function doJoin(code?: string): Promise<void> {
   menuError.textContent = '';
-  const name = nameInput.value.trim() || 'Racer';
+  const name = nameInput.value.trim() || 'Runner';
   localStorage.setItem('laptrap-name', name);
   const c = (code || joinCodeInput.value).toUpperCase().trim();
   if (!c) { menuError.textContent = 'Enter a room code'; return; }
@@ -180,10 +190,12 @@ function setBuildMode(mode: 'trap' | 'track'): void {
   if (mode === 'trap') {
     show(obstaclePicks);
     hide(trackPicks);
-    placeHint.textContent = 'Select a trap, then left-click asphalt to place (one per round)';
+    scene?.setGhostType(selectedObstacle);
+    placeHint.textContent = 'Select a trap, then left-click ANYWHERE on the map (R = rotate, one per round)';
   } else {
     hide(obstaclePicks);
     trackPicks.classList.remove('hidden');
+    scene?.setGhostType(null);
     placeHint.textContent = 'Select a piece, then left-click a green socket (one per round)';
   }
 }
@@ -250,7 +262,8 @@ function renderLobby(s: RoomState): void {
     sw.className = 'swatch';
     sw.style.background = p.color;
     const name = document.createElement('span');
-    name.textContent = p.name + (p.id === net.myId() ? ' (you)' : '') + (p.isHost ? ' 👑' : '');
+    const fr = fruitOf(p.fruit);
+    name.textContent = `${fr?.emoji ?? ''} ${p.name}` + (fr ? ` · ${fr.name}` : '') + (p.id === net.myId() ? ' (you)' : '') + (p.isHost ? ' 👑' : '');
     const badge = document.createElement('span');
     badge.className = 'badge' + (p.ready ? ' ready' : '');
     badge.textContent = !p.connected ? 'disconnected' : p.ready ? 'READY' : '…';
@@ -266,7 +279,8 @@ function renderLobby(s: RoomState): void {
 }
 
 function renderHud(s: RoomState): void {
-  hudPhase.textContent = s.phase.toUpperCase();
+  const phaseNames: Record<string, string> = { racing: 'RUN!', placing: 'BUILD', countdown: 'GET READY' };
+  hudPhase.textContent = phaseNames[s.phase] ?? s.phase.toUpperCase();
   hudRound.textContent = s.round ? `Round ${s.round}` : '';
   const me = s.players.find((p) => p.id === net.myId());
   const myCar = s.cars.find((c) => c.id === net.myId());
@@ -291,7 +305,7 @@ function renderHud(s: RoomState): void {
     .map((p) => {
       const car = s.cars.find((c) => c.id === p.id);
       const tag = car?.eliminated ? ' 💀' : '';
-      return `<div><span style="color:${p.color}">${p.name}${tag}</span><span>${p.score}</span></div>`;
+      return `<div><span style="color:${p.color}">${fruitOf(p.fruit)?.emoji ?? ''} ${p.name}${tag}</span><span>${p.score}</span></div>`;
     })
     .join('');
 
@@ -308,7 +322,7 @@ function renderHud(s: RoomState): void {
       const dnf = car?.eliminated ? ` <em>(DNF${car.eliminateReason ? ': ' + car.eliminateReason : ''})</em>` : '';
       return `<div>${i + 1}. ${p?.name ?? '?'}${dnf} <strong>+${pts}</strong></div>`;
     });
-    resultsOverlay.innerHTML = `<h2>Race Results</h2>${lines.join('')}<p class="hint">Place one trap or track piece…</p>`;
+    resultsOverlay.innerHTML = `<h2>Run Results</h2>${lines.join('')}<p class="hint">Place one trap or track piece…</p>`;
     show(resultsOverlay);
   } else hide(resultsOverlay);
 
@@ -325,6 +339,7 @@ function renderHud(s: RoomState): void {
     } else {
       placeTurn.textContent = `Build — one item (${placedCount}/${total})`;
       scene?.setPlacing(true);
+      scene?.setGhostType(buildMode === "trap" ? selectedObstacle : null);
     }
   } else {
     hide(placeUi);
@@ -422,7 +437,8 @@ function bindKey(code: string, down: boolean): void {
     case 'KeyS': case 'ArrowDown': keys.back = down; break;
     case 'KeyA': case 'ArrowLeft': keys.left = down; break;
     case 'KeyD': case 'ArrowRight': keys.right = down; break;
-    case 'Space': keys.boost = down; break;
+    case 'Space': keys.jump = down; break;
+    case 'KeyR': if (down && scene?.placing && buildMode === 'trap') scene.rotateGhost(Math.PI / 4); break;
   }
 }
 window.addEventListener('keydown', (e) => {
@@ -435,7 +451,7 @@ window.addEventListener('keyup', (e) => bindKey(e.code, false));
 
 mobileControls.querySelectorAll('button').forEach((btn) => {
   const key = btn.getAttribute('data-key') as keyof InputState;
-  const set = (v: boolean) => { if (key in keys) (keys as Record<string, boolean>)[key] = v; };
+  const set = (v: boolean) => { if (key in keys) (keys as unknown as Record<string, boolean>)[key] = v; };
   btn.addEventListener('touchstart', (e) => { e.preventDefault(); set(true); });
   btn.addEventListener('touchend', (e) => { e.preventDefault(); set(false); });
   btn.addEventListener('mousedown', () => set(true));
@@ -448,7 +464,7 @@ const roomParam = params.get('room');
 if (roomParam) {
   joinCodeInput.value = roomParam.toUpperCase();
   const join = () => {
-    if (!nameInput.value.trim()) nameInput.value = 'Racer' + Math.floor(Math.random() * 90 + 10);
+    if (!nameInput.value.trim()) nameInput.value = 'Runner' + Math.floor(Math.random() * 90 + 10);
     void doJoin(roomParam);
   };
   net.getSocket().once('connect', join);

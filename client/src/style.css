@@ -350,3 +350,5 @@ input {
 #place-ui {
   width: min(560px, 96vw);
 }
+
+.fruit-row { font-size: 1.6rem; letter-spacing: 0.15em; margin: 0.2rem 0 0.8rem; }

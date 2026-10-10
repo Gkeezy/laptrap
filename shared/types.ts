@@ -28,7 +28,7 @@ export const TRACK_PIECE_TYPES: TrackPieceType[] = ['straight', 'curveL', 'curve
 export const OBSTACLE_LABELS: Record<ObstacleType, string> = {
   barrier: 'Barrier',
   ice: 'Ice',
-  boost: 'Boost',
+  boost: 'Speed Pad',
   ramp: 'Ramp',
   oil: 'Oil',
   bomb: 'Bomb',
@@ -39,7 +39,7 @@ export const OBSTACLE_LABELS: Record<ObstacleType, string> = {
 export const OBSTACLE_ICONS: Record<ObstacleType, string> = {
   barrier: '🧱',
   ice: '🧊',
-  boost: '🚀',
+  boost: '⚡',
   ramp: '📐',
   oil: '🛢️',
   bomb: '💣',
@@ -58,6 +58,24 @@ export const TRACK_PIECE_ICONS: Record<TrackPieceType, string> = {
   curveL: '↩️',
   curveR: '↪️',
 };
+
+export type FruitType =
+  | 'apple' | 'banana' | 'orange' | 'strawberry' | 'watermelon'
+  | 'pineapple' | 'grapes' | 'lemon' | 'cherry' | 'pear';
+
+/** 10 runners, one per player slot. color = main body color used in HUD. */
+export const FRUITS: Array<{ type: FruitType; name: string; emoji: string; color: string }> = [
+  { type: 'apple', name: 'Apple', emoji: '🍎', color: '#e74c3c' },
+  { type: 'banana', name: 'Banana', emoji: '🍌', color: '#f7d046' },
+  { type: 'orange', name: 'Orange', emoji: '🍊', color: '#f39c12' },
+  { type: 'strawberry', name: 'Strawberry', emoji: '🍓', color: '#e8304a' },
+  { type: 'watermelon', name: 'Watermelon', emoji: '🍉', color: '#2ecc71' },
+  { type: 'pineapple', name: 'Pineapple', emoji: '🍍', color: '#d4a017' },
+  { type: 'grapes', name: 'Grapes', emoji: '🍇', color: '#8e44ad' },
+  { type: 'lemon', name: 'Lemon', emoji: '🍋', color: '#fff176' },
+  { type: 'cherry', name: 'Cherry', emoji: '🍒', color: '#b0122b' },
+  { type: 'pear', name: 'Pear', emoji: '🍐', color: '#a8d04a' },
+];
 
 export const CAR_COLORS = [
   '#e74c3c', '#3498db', '#2ecc71', '#f1c40f', '#9b59b6',
@@ -79,6 +97,7 @@ export interface PlayerPublic {
   connected: boolean;
   isHost: boolean;
   hasPlaced: boolean;
+  fruit: FruitType;
 }
 
 export interface CarState {
@@ -186,7 +205,8 @@ export interface InputState {
   back: boolean;
   left: boolean;
   right: boolean;
-  boost: boolean;
+  /** Space: hop */
+  jump: boolean;
 }
 
 export interface PoseUpdate {
@@ -221,6 +241,9 @@ export interface ServerToClientEvents {
   error: (message: string) => void;
   chat: (payload: { name: string; text: string }) => void;
 }
+
+/** Free trap placement bounds (world units from origin) */
+export const MAP_HALF_SIZE = 200;
 
 export const TRACK = {
   width: 10,
